@@ -5,3 +5,6 @@ docker==7.2.0
 idna==3.19
 requests==2.34.2
 urllib3==2.7.0
+
+pydantic==2.13.5
+aiodocker==0.27.0

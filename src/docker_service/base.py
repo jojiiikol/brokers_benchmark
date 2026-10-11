@@ -1,15 +1,15 @@
 from abc import ABC, abstractmethod
 
+from src.docker_configurator import ContainerConfig
+
 
 class BaseDockerService(ABC):
 
     @abstractmethod
     async def create_container(
             self,
-            image: str,
-            name: str,
-            **kwargs
-    ):
+            container_config: ContainerConfig,
+    ) -> str | None:
         pass
 
     @abstractmethod
