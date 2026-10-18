@@ -86,20 +86,17 @@ class SdkDockerService():
 async def main():
     service = SdkDockerService()
 
-    container_id = await service.create_container(
-        ContainerConfig(
-            image="rabbitmq:management",
-            name="rabbit2",
-            ports=[PortBinding(
-                host_port=15567,
-                container_port=15567,
-            )],
-        )
-    )
-    container = await service.get_container(
-        container_id=container_id,
-    )
-    await container.start()
+    # container_id = await service.create_container(
+    #     ContainerConfig(
+    #         image="scenario",
+    #         name="name_scenario",
+    #     )
+    # )
+    # container = await service.get_container(
+    #     container_id=container_id,
+    # )
+    # await container.start()
+    print(await service.get_list_containers())
     await service.close_client()
 
 if __name__ == '__main__':
