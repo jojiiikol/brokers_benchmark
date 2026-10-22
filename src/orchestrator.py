@@ -1,7 +1,7 @@
 import asyncio
 
 from src.docker_service.docker_sdk import SdkDockerService
-from src.scenario_service.dto.config import Brokers, LoadType
+from src.scenario_service.dto.scenario_config import Brokers, LoadType
 from src.scenario_service.service import ScenarioService, ScenarioConfig, Scenario, ScenarioStatus
 
 

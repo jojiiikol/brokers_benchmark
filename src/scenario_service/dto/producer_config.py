@@ -1,12 +1,6 @@
 import dataclasses
 import enum
 
-
-class Brokers(enum.Enum):
-    RABBITMQ = "rabbit_mq"
-    KAFKA = "kafka"
-    NATS = "nats"
-
 class LoadType(enum.Enum):
     linear = "linear"
     exponential = "exponential"
@@ -17,15 +11,14 @@ class GuaranteeType(enum.Enum):
     AT_LEAST_ONCE = "at_least_once"
     EXACTLY_ONCE = "exactly_once"
 
+
 @dataclasses.dataclass
-class ScenarioConfig:
-    broker_type: Brokers
-
-    consumers_count: int
-    producers_count: int
-
+class ProducerConfig:
     load_type: LoadType
-    guarantee_type: str
-    intensity: int
-
     message_size: int
+    speed: int
+    guarantee_type: GuaranteeType
+    count: int
+
+
+

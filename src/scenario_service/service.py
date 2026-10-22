@@ -3,15 +3,21 @@ import dataclasses
 import datetime
 import enum
 import logging
+import os
+import pathlib
 
 from src import setup_logging
 from src.docker_configurator import ContainerConfig
 from src.docker_service.docker_sdk import SdkDockerService
-from src.scenario_service.dto.config import ScenarioConfig
+from src.scenario_service.configurator import ComponentConfigurator
+from src.scenario_service.dto.broker_config import BrokerConfig, Brokers
+from src.scenario_service.dto.consumer_config import ConsumerConfig
+from src.scenario_service.dto.producer_config import ProducerConfig, LoadType, GuaranteeType
+from src.scenario_service.dto.scenario_config import ScenarioConfig
 
 logger = logging.getLogger("my_app")
 
-
+COMPONENTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "components"
 
 class ScenarioStatus(enum.Enum):
     CREATED = 'CREATED'
@@ -38,9 +44,12 @@ class ScenarioService:
 
     def __init__(
             self,
-            docker_service: SdkDockerService
+            # configurator: ComponentConfigurator,
+            docker_service: SdkDockerService = SdkDockerService(),
+
     ):
         self.docker_service = docker_service
+        self.configurator = ComponentConfigurator(docker_service)
 
     async def create_scenario(
             self,
@@ -57,15 +66,42 @@ class ScenarioService:
             created_at=datetime.datetime.now(),
         )
 
+        self.configurator.broker_configure(scenario.config.broker_config)
 
-        if scenario.config.broker_type == "scenario_1":
-            container_id = await self.docker_service.create_container(
-                container_config=ContainerConfig(
-                    image="scenario",
-                    name="scenario_1",
-                )
+        network = await self.docker_service.create_network(
+            name="scenario-5",
+        )
+
+        producer_image_tag = await self.docker_service.get_image(
+            path=COMPONENTS_PATH / "consumers" / "rabbit_mq",
+            tag="producer-rabbitmq",
+            path_dockerfile="Dockerfile",
+            labels={"component": "producer"},
+        )
+        producer_container = await self.docker_service.create_container(
+            container_config=ContainerConfig(
+                image=producer_image_tag,
+                name="producer-8",
+                network_name="scenario-1"
             )
-            scenario.containers.append(container_id)
+        )
+
+        broker_image = await self.docker_service.get_image(
+            tag="rabbitmq"
+        )
+        broker_container = await self.docker_service.create_container(
+            container_config=ContainerConfig(
+                image=broker_image,
+                name="rabbitmq-8",
+                network_name="scenario-1"
+            )
+        )
+
+        await network.connect({"Container": broker_container})
+        await network.connect({"Container": producer_container})
+
+        scenario.containers.append(producer_container)
+        scenario.containers.append(broker_container)
 
         logger.info(f"Created scenario {scenario.id}")
         return scenario
@@ -124,19 +160,26 @@ class ScenarioService:
 
 async def main():
     service = ScenarioService()
-    await service.create_scenario(
-        scenario_config={}
+    await service.docker_service.open_client()
+    scenario = await service.create_scenario(
+        scenario_config=ScenarioConfig(
+            broker_config=BrokerConfig(
+                broker_type=Brokers.RABBITMQ
+            ),
+            consumer_config=ConsumerConfig(
+                count=1
+            ),
+            producer_config=ProducerConfig(
+                load_type=LoadType.linear,
+                message_size=1024,
+                speed=2,
+                guarantee_type=GuaranteeType.EXACTLY_ONCE,
+                count=1
+            )
+        )
     )
-    await service.create_scenario(
-        scenario_config={}
-    )
-    await service.create_scenario(
-        scenario_config={}
-    )
-    await service.create_scenario(
-        scenario_config={}
-    )
-    await service.start_background()
+    print(scenario)
+
 
 
 if __name__ == "__main__":

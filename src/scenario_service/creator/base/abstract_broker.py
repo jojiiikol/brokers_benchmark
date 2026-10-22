@@ -2,15 +2,14 @@ import abc
 from typing import Generic
 
 from src.scenario_service.creator.base.abstract_creator import BaseCreator, ConfigT
-from src.scenario_service.dto.config import Brokers
+from src.scenario_service.dto.broker_config import Brokers
 
 
 class BaseBrokerCreator(BaseCreator[ConfigT], Generic[ConfigT]):
     def __init__(
             self,
-            broker_type: Brokers
     ):
-        self.broker_type = broker_type
+        pass
 
     def configurate(
             self,

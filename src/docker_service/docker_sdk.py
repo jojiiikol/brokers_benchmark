@@ -4,32 +4,52 @@ import logging
 import pathlib
 import tarfile
 from itertools import starmap
+from typing import AsyncGenerator
 
 from aiodocker.containers import DockerContainer
 
+from src import setup_logging
 from src.docker_configurator import ContainerConfig, build_docker_payload, PortBinding
 from .base import BaseDockerService
 import aiodocker
-
+setup_logging()
 logger = logging.getLogger("DockerService")
 
-class SdkDockerService():
+class SdkDockerService:
     BASE_DIR = pathlib.Path(__file__).resolve().parent
     COMPONENT_PATH = BASE_DIR / "components"
 
     def __init__(self, **kwargs):
+        self.client = None
+
+    async def open_client(self):
         self.client = aiodocker.Docker()
 
     async def close_client(self):
         await self.client.close()
+
+    async def create_network(
+            self,
+            name: str
+    ):
+        network = await self.client.networks.create(
+            config={
+                "Name": name,
+                "Driver": "bridge",  # Драйвер сети (bridge, overlay и т.д.)
+                "CheckDuplicate": True,
+                "Internal": False,
+                "Attachable": True,
+            }
+        )
+        return network
+
+
 
     async def create_container(
             self,
             container_config: ContainerConfig,
     ) -> str | None:
         try:
-            await self.client.images.pull("rabbit_mq", tag="management")
-
             config, name, _ = build_docker_payload(container_config)
             if not config:
                 logger.warning("Config is not valid!")
@@ -103,6 +123,50 @@ class SdkDockerService():
         archive.seek(0)
         return archive
 
+    async def _image_logs(
+            self,
+            stream: AsyncGenerator[bytes, None],
+    ):
+        async for chunk in stream:
+            if "stream" in chunk:
+                logger.info(chunk["stream"].strip())
+            if "error" in chunk:
+                logger.error(f"Build error: {chunk['error']}")
+                return None
+
+    async def get_image(
+            self,
+            tag: str,
+            path_dockerfile: str | None = None,
+            path: pathlib.Path | None = None,
+            labels: dict[str, str] | None = None,
+    ) -> str | None:
+        if tag is None:
+            logger.error("No tag provided")
+            return None
+
+        if path is None:
+            return await self.pull_image(tag)
+        else:
+            return await self.build_image(
+                path=path,
+                tag=tag,
+                path_dockerfile=path_dockerfile,
+                labels=labels,
+            )
+
+    async def pull_image(
+            self,
+            tag: str,
+    ):
+        try:
+            stream = self.client.images.pull(tag, stream=True)
+            await self._image_logs(stream)
+            return tag
+        except Exception as e:
+            logger.error(e)
+            return None
+
     async def build_image(
             self,
             path: pathlib.Path,
@@ -114,14 +178,17 @@ class SdkDockerService():
         # Генерция тега
         try:
             archive = self._create_build_context(path)
-            await self.client.images.build(
+            build_stream = self.client.images.build(
                 fileobj=archive,
                 path_dockerfile=path_dockerfile,
                 encoding="identity",
                 tag=tag,
-                labels=labels
+                labels=labels,
+                stream=True,
             )
+            await self._image_logs(build_stream)
             return tag
+
         except Exception as e:
             logger.error(e)
             return None
@@ -131,8 +198,10 @@ class SdkDockerService():
 
 async def main():
     service = SdkDockerService()
+    print(pathlib.Path(__file__).resolve().parent.parent / "components" / "consumers" / "rabbit_mq")
+    await service.open_client()
     a = await service.build_image(
-        path=pathlib.Path(__file__).resolve().parent / "components" / "consumers" / "rabbit_mq",
+        path=pathlib.Path(__file__).resolve().parent.parent / "components" / "consumers" / "rabbit_mq",
         tag="rabbit_mq-consumers",
         path_dockerfile="Dockerfile",
         labels=None
