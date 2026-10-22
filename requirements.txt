@@ -8,3 +8,5 @@ urllib3==2.7.0
 
 pydantic==2.13.5
 aiodocker==0.27.0
+python-dotenv==1.2.4
+aio-pika==10.1.1

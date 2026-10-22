@@ -1,5 +1,9 @@
 import asyncio
+import io
 import logging
+import pathlib
+import tarfile
+from itertools import starmap
 
 from aiodocker.containers import DockerContainer
 
@@ -10,6 +14,9 @@ import aiodocker
 logger = logging.getLogger("DockerService")
 
 class SdkDockerService():
+    BASE_DIR = pathlib.Path(__file__).resolve().parent
+    COMPONENT_PATH = BASE_DIR / "components"
+
     def __init__(self, **kwargs):
         self.client = aiodocker.Docker()
 
@@ -21,7 +28,7 @@ class SdkDockerService():
             container_config: ContainerConfig,
     ) -> str | None:
         try:
-            await self.client.images.pull("rabbitmq", tag="management")
+            await self.client.images.pull("rabbit_mq", tag="management")
 
             config, name, _ = build_docker_payload(container_config)
             if not config:
@@ -82,22 +89,56 @@ class SdkDockerService():
         await container.stop()
         await container.delete()
 
+    def _create_build_context(self, context_path: pathlib.Path) -> io.BytesIO:
+        archive = io.BytesIO()
+
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            for path in context_path.rglob("*"):
+                if path.is_file():
+                    tar.add(
+                        path,
+                        arcname=path.relative_to(context_path),
+                    )
+
+        archive.seek(0)
+        return archive
+
+    async def build_image(
+            self,
+            path: pathlib.Path,
+            tag: str,
+            path_dockerfile: str,
+            labels: dict[str, str] | None = None,
+    ) -> str | None:
+        # Надо понять как строить путь
+        # Генерция тега
+        try:
+            archive = self._create_build_context(path)
+            await self.client.images.build(
+                fileobj=archive,
+                path_dockerfile=path_dockerfile,
+                encoding="identity",
+                tag=tag,
+                labels=labels
+            )
+            return tag
+        except Exception as e:
+            logger.error(e)
+            return None
+
+
+
 
 async def main():
     service = SdkDockerService()
-
-    # container_id = await service.create_container(
-    #     ContainerConfig(
-    #         image="scenario",
-    #         name="name_scenario",
-    #     )
-    # )
-    # container = await service.get_container(
-    #     container_id=container_id,
-    # )
-    # await container.start()
-    print(await service.get_list_containers())
-    await service.close_client()
+    a = await service.build_image(
+        path=pathlib.Path(__file__).resolve().parent / "components" / "consumers" / "rabbit_mq",
+        tag="rabbit_mq-consumers",
+        path_dockerfile="Dockerfile",
+        labels=None
+    )
+    print(a)
+    await service.client.close()
 
 if __name__ == '__main__':
     asyncio.run(main())

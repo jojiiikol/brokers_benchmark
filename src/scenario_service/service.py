@@ -7,21 +7,11 @@ import logging
 from src import setup_logging
 from src.docker_configurator import ContainerConfig
 from src.docker_service.docker_sdk import SdkDockerService
+from src.scenario_service.dto.config import ScenarioConfig
 
 logger = logging.getLogger("my_app")
 
-@dataclasses.dataclass
-class ScenarioConfig:
-    broker_type: str
 
-    consumers_count: int
-    producers_count: int
-
-    load_type: str
-    guarantee_type: str
-    intensity: int
-
-    message_size: int
 
 class ScenarioStatus(enum.Enum):
     CREATED = 'CREATED'

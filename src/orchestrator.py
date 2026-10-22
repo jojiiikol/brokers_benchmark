@@ -1,6 +1,7 @@
 import asyncio
 
 from src.docker_service.docker_sdk import SdkDockerService
+from src.scenario_service.dto.config import Brokers, LoadType
 from src.scenario_service.service import ScenarioService, ScenarioConfig, Scenario, ScenarioStatus
 
 
@@ -62,19 +63,19 @@ class Orchestrator:
 async def main():
     orchestrator = Orchestrator()
     scenario_config = ScenarioConfig(
-        broker_type="scenario_1",
+        broker_type=Brokers.RABBITMQ,
         consumers_count=1,
         producers_count=1,
-        load_type="linear",
+        load_type=LoadType.linear,
         guarantee_type="1",
         intensity=100,
         message_size=8
     )
     scenario_config_2 = ScenarioConfig(
-        broker_type="scenario_2",
+        broker_type=Brokers.KAFKA,
         consumers_count=1,
         producers_count=2,
-        load_type="exponentioal",
+        load_type=LoadType.exponential,
         guarantee_type="3",
         intensity=250,
         message_size=64
