@@ -5,6 +5,7 @@ import enum
 import logging
 import os
 import pathlib
+import uuid
 
 from src import setup_logging
 from src.docker_configurator import ContainerConfig
@@ -56,9 +57,10 @@ class ScenarioService:
             scenario_config: ScenarioConfig,
     ) -> Scenario:
 
+        scenario_id = str(uuid.uuid4())
         scenario = Scenario(
-            id="1",
-            name="scenario 1",
+            id=scenario_id,
+            name="scenario - {}".format(scenario_id),
             containers=[],
             config=scenario_config,
             finished_at=None,
@@ -69,8 +71,21 @@ class ScenarioService:
         self.configurator.broker_configure(scenario.config.broker_config)
 
         network = await self.docker_service.create_network(
-            name="scenario-5",
+            name=f"network-{scenario_id}",
         )
+
+        broker_image = await self.docker_service.get_image(
+            tag="rabbitmq"
+        )
+        broker_container = await self.docker_service.create_container(
+            container_config=ContainerConfig(
+                image=broker_image,
+                name=f"rabbitmq-{scenario_id}",
+                network_name=f"network-{scenario_id}",
+            )
+        )
+
+        scenario_config.producer_config.docker_args = ["--broker-host", f"rabbitmq-{scenario_id}"]
 
         producer_image_tag = await self.docker_service.get_image(
             path=COMPONENTS_PATH / "consumers" / "rabbit_mq",
@@ -81,19 +96,9 @@ class ScenarioService:
         producer_container = await self.docker_service.create_container(
             container_config=ContainerConfig(
                 image=producer_image_tag,
-                name="producer-8",
-                network_name="scenario-1"
-            )
-        )
-
-        broker_image = await self.docker_service.get_image(
-            tag="rabbitmq"
-        )
-        broker_container = await self.docker_service.create_container(
-            container_config=ContainerConfig(
-                image=broker_image,
-                name="rabbitmq-8",
-                network_name="scenario-1"
+                name=f"producer-{scenario_id}",
+                network_name=f"network-{scenario_id}",
+                cmd=scenario_config.producer_config.docker_args,
             )
         )
 
@@ -174,7 +179,8 @@ async def main():
                 message_size=1024,
                 speed=2,
                 guarantee_type=GuaranteeType.EXACTLY_ONCE,
-                count=1
+                count=1,
+                docker_args={}
             )
         )
     )

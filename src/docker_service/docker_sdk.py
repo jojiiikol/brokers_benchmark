@@ -30,15 +30,17 @@ class SdkDockerService:
 
     async def create_network(
             self,
-            name: str
+            name: str,
+            labels: dict[str, str] | None = None,
     ):
         network = await self.client.networks.create(
             config={
                 "Name": name,
-                "Driver": "bridge",  # Драйвер сети (bridge, overlay и т.д.)
+                "Driver": "bridge",
                 "CheckDuplicate": True,
                 "Internal": False,
                 "Attachable": True,
+                "Labels": labels
             }
         )
         return network

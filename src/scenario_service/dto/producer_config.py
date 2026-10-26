@@ -1,5 +1,7 @@
 import dataclasses
 import enum
+from typing import Any
+
 
 class LoadType(enum.Enum):
     linear = "linear"
@@ -19,6 +21,7 @@ class ProducerConfig:
     speed: int
     guarantee_type: GuaranteeType
     count: int
+    docker_args: list[str]
 
 
 
