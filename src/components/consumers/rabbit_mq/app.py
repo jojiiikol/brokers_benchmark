@@ -1,6 +1,9 @@
 import asyncio
+import json
 import logging
+import logging.config
 import os
+from typing import Any
 
 import aio_pika
 from aiormq import AMQPConnectionError
@@ -8,73 +11,161 @@ from dotenv import load_dotenv
 import argparse
 load_dotenv()
 
-BROKER_HOST = os.getenv("BROKER_HOST", 'rabbitmq')
-BROKER_PORT = os.getenv("BROKER_PORT", "5672")
-BROKER_USER = os.getenv("BROKER_USER", 'guest')
-BROKER_PASSWORD = os.getenv("BROKER_PASSWORD", 'guest')
-QUEUE_NAME = os.getenv("QUEUE_NAME")
+LOGGING_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": (
+                "%(asctime)s | %(levelname)s | "
+                "%(name)s:%(lineno)d | %(message)s"
+            ),
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "DEBUG",
+            "formatter": "standard",
+            "stream": "ext://sys.stdout",
+        },
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["console"],
+    },
+}
 
-RABBITMQ_URL = f"amqp://{BROKER_USER}:{BROKER_PASSWORD}@{BROKER_HOST}:{BROKER_PORT}/"
+logging.config.dictConfig(LOGGING_CONFIG)
 
-SPEED = 1
-MESSAGE_SIZE = 64
+logger = logging.getLogger(__name__)
 
-
-
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(),                       # консоль
-        logging.FileHandler("app.log", mode="a"),      # файл
-    ],
-)
+class Producer:
+    CONNECTION_URL: str = ""
+    TPS: int = 1
+    MESSAGE_SIZE: int = 64
 
 
-logger = logging.getLogger("consumer")
+    def __init__(
+            self,
+            queue_name: str = "scenario",
+            broker_user: str = "guest",
+            broker_password: str = "guest",
+            broker_host: str = "rabbitmq",
+            broker_port: str = "5672",
+            tps: int = 1,
 
-async def run():
-    attempts = 5
-    connection = None
+    ):
+        self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
 
-    while attempts >= 0:
-        try:
-            connection = await aio_pika.connect_robust(RABBITMQ_URL)
-        except AMQPConnectionError:
-            print("No connection, retrying...")
-            await asyncio.sleep(5)
+        self._connection = None
+        self._channel = None
 
-        attempts -= 1
+        self.TPS = tps
+        self._interval = 1.0 / self.TPS
 
-    if connection is None:
-        print("Connection failed")
-        return
+        self.queue_name = queue_name
 
-    async with connection:
-        channel = await connection.channel()
-        await channel.set_qos(prefetch_count=10)
 
-        queue = await channel.declare_queue(
-            QUEUE_NAME,
+    async def _connect(self):
+        if self._connection is not None:
+            return self._connection
+
+        attempts = 5
+        while attempts > 0:
+            try:
+                self._connection = await aio_pika.connect_robust(self.CONNECTION_URL)
+                self._channel = await self._connection.channel()
+                return
+            except AMQPConnectionError:
+                logging.warning("No connection, retrying...")
+                await asyncio.sleep(5)
+            attempts -= 1
+        raise Exception("Connection failed")
+
+    async def declare_queue(self) -> None:
+        if self._channel is None:
+            raise RuntimeError("Producer is not connected")
+
+        await self._channel.declare_queue(
+            name=self.queue_name,
             durable=True,
         )
 
-        print(f"Ожидание сообщений из очереди {QUEUE_NAME}...")
+    async def publish(self, data: dict[str, Any]) -> None:
+        if self._channel is None:
+            raise RuntimeError("Producer is not connected")
 
-        async with queue.iterator() as queue_iter:
-            async for message in queue_iter:
-                async with message.process():
-                    body = message.body.decode("utf-8")
-                    print(f"Получено сообщение: {body}")
+        message = aio_pika.Message(
+            body=json.dumps(data).encode(),
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            content_type="application/json",
+        )
+
+        await self._channel.default_exchange.publish(
+            message,
+            routing_key=self.queue_name,
+        )
+        logger.info("Message published")
+
+    async def publish_many(
+            self,
+            messages: list[dict[str, Any]],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        next_publish = loop.time()
+
+        for data in messages:
+            delay = next_publish - loop.time()
+
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            await self.publish(data)
+            next_publish += self._interval
+
+
+    async def publish_forever(self, data: dict) -> None:
+        loop = asyncio.get_running_loop()
+        next_publish = loop.time()
+
+        while True:
+            delay = next_publish - loop.time()
+
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            await self.publish(data)
+            next_publish += self._interval
+
+
+    async def close(self) -> None:
+        if self._connection is not None:
+            await self._connection.close()
+            self._connection = None
+            self._channel = None
+
+    async def __aenter__(self) -> "RabbitMQProducer":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
+
+
+
 
 
 
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--broker-host", type=str, default="rabbitmq", required=True, help="RabbitMQ broker host"
+        "--broker-host", type=str, required=True, help="RabbitMQ broker host"
+    )
+    parser.add_argument(
+        "--broker-port", type=str, default="5672", required=False, help="RabbitMQ broker port"
     )
     parser.add_argument(
         "--rps", type=int, default=1, help="Request per second for message sending"
@@ -84,16 +175,18 @@ async def main():
     )
     args = parser.parse_args()
 
-    global SPEED, MESSAGE_SIZE, BROKER_HOST, RABBITMQ_URL
+    producer = Producer(
+        queue_name="scenario",
+        broker_host=args.broker_host,
+        broker_port=args.broker_port,
+        tps=int(args.rps),
+    )
+    await producer._connect()
+    await producer.declare_queue()
+    await producer.publish_forever(
+        data={"text": "hello world"}
+    )
 
-    SPEED = args.rps
-    MESSAGE_SIZE = args.payload_size
-    BROKER_HOST = args.broker_host
-
-    RABBITMQ_URL= f"amqp://{BROKER_USER}:{BROKER_PASSWORD}@{BROKER_HOST}:{BROKER_PORT}/"
-    print(SPEED, MESSAGE_SIZE)
-
-    await run()
 
 
 if __name__ == "__main__":

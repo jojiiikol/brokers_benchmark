@@ -18,6 +18,8 @@ from src.scenario_service.dto.scenario_config import ScenarioConfig
 
 logger = logging.getLogger("my_app")
 
+setup_logging()
+
 COMPONENTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "components"
 
 class ScenarioStatus(enum.Enum):
@@ -85,7 +87,10 @@ class ScenarioService:
             )
         )
 
-        scenario_config.producer_config.docker_args = ["--broker-host", f"rabbitmq-{scenario_id}"]
+        scenario_config.producer_config.docker_args.extend([
+            "--broker-host", f"rabbitmq-{scenario_id}",
+            "--broker-port", "5672",
+        ])
 
         producer_image_tag = await self.docker_service.get_image(
             path=COMPONENTS_PATH / "consumers" / "rabbit_mq",
@@ -180,7 +185,7 @@ async def main():
                 speed=2,
                 guarantee_type=GuaranteeType.EXACTLY_ONCE,
                 count=1,
-                docker_args={}
+                docker_args=["--rps", "5"]
             )
         )
     )

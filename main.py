@@ -1,7 +1,4 @@
-ddd = {
-    "aaa": 123,
-    "bbb": 456,
-}
-
-l = [item for pair in ddd.items() for item in pair]
-print(l)
+attempts = 5
+while attempts >= 0:
+    print(attempts)
+    attempts -= 1
