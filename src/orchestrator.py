@@ -1,9 +1,16 @@
 import asyncio
+import logging
 
+from src import setup_logging
 from src.docker_service.docker_sdk import SdkDockerService
-from src.scenario_service.dto.scenario_config import Brokers, LoadType
+from src.scenario_service.dto.broker_config import BrokerConfig, Brokers
+from src.scenario_service.dto.consumer_config import ConsumerConfig
+from src.scenario_service.dto.producer_config import ProducerConfig, GuaranteeType, LoadType
 from src.scenario_service.service import ScenarioService, ScenarioConfig, Scenario, ScenarioStatus
 
+setup_logging()
+
+logger = logging.getLogger(__name__)
 
 class Orchestrator:
     MAX_RUNNING_SCENARIO_COUNT: int = 5
@@ -12,6 +19,8 @@ class Orchestrator:
         self.docker_service = SdkDockerService()
         self.scenario_service = ScenarioService(self.docker_service)
         self.scenario_storage: list = []
+
+        self.create_image_lock = asyncio.Lock()
 
     @property
     def scenario_running_count(self) -> int:
@@ -34,9 +43,18 @@ class Orchestrator:
         older_scenario = min(running_scenarios, key=lambda scenario: scenario.created_at, default=None)
         return older_scenario
 
+
     @property
     def _check_run_available(self) -> bool:
         return self.scenario_running_count < ScenarioService.MAX_RUNNING_SCENARIO_COUNT
+
+    def get_info(self):
+        full_text = []
+        for key, scenario in enumerate(self.scenario_storage):
+            full_text.append(
+                f"Number {key} | id: {scenario.id} | status: {scenario.status}"
+            )
+        return "\n".join(full_text)
 
     async def create_scenario(
             self,
@@ -59,33 +77,53 @@ class Orchestrator:
         )
         return scenario_id
 
+    async def _initialize_scenario(self):
+        async with self.create_image_lock:
+            older = self._get_older_scenario
+            if older is None:
+                logger.info("Not new scenario")
+                return
+
+            await self.scenario_service.initialize_scenario(older)
+
+    async def _process(self) -> None:
+        while True:
+            logger.info(self.get_info())
+            await self._initialize_scenario()
+
+            await asyncio.sleep(3)
+
+    async def run(self):
+        task = asyncio.create_task(self._process())
+        await asyncio.gather(task, return_exceptions=True)
+
+
 
 async def main():
     orchestrator = Orchestrator()
-    scenario_config = ScenarioConfig(
-        broker_type=Brokers.RABBITMQ,
-        consumers_count=1,
-        producers_count=1,
-        load_type=LoadType.linear,
-        guarantee_type="1",
-        intensity=100,
-        message_size=8
-    )
-    scenario_config_2 = ScenarioConfig(
-        broker_type=Brokers.KAFKA,
-        consumers_count=1,
-        producers_count=2,
-        load_type=LoadType.exponential,
-        guarantee_type="3",
-        intensity=250,
-        message_size=64
+    await orchestrator.docker_service.open_client()
+    await orchestrator.create_scenario(
+        scenario_config=ScenarioConfig(
+            broker_config=BrokerConfig(
+                broker_type=Brokers.RABBITMQ
+            ),
+            consumer_config=ConsumerConfig(
+                count=1
+            ),
+            producer_config=ProducerConfig(
+                load_type=LoadType.linear,
+                message_size=1024,
+                speed=2,
+                guarantee_type=GuaranteeType.EXACTLY_ONCE,
+                count=1,
+                docker_args=["--rps", "5"]
+            )
+        )
     )
 
-    await orchestrator.create_scenario(scenario_config)
-    await orchestrator.create_scenario(scenario_config_2)
-    print(orchestrator.scenario_storage)
-    await orchestrator.start_scenario()
-    print(orchestrator.scenario_storage)
+
+    await orchestrator.run()
+    await orchestrator.docker_service.client.close()
 
 
 if __name__ == "__main__":

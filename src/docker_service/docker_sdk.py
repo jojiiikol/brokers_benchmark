@@ -7,6 +7,7 @@ from itertools import starmap
 from typing import AsyncGenerator
 
 from aiodocker.containers import DockerContainer
+from aiodocker.networks import DockerNetwork
 
 from src import setup_logging
 from src.docker_configurator import ContainerConfig, build_docker_payload, PortBinding
@@ -32,18 +33,23 @@ class SdkDockerService:
             self,
             name: str,
             labels: dict[str, str] | None = None,
-    ):
-        network = await self.client.networks.create(
-            config={
-                "Name": name,
-                "Driver": "bridge",
-                "CheckDuplicate": True,
-                "Internal": False,
-                "Attachable": True,
-                "Labels": labels
-            }
-        )
-        return network
+    ) -> DockerNetwork | None:
+        try:
+            network = await self.client.networks.create(
+                config={
+                    "Name": name,
+                    "Driver": "bridge",
+                    "CheckDuplicate": True,
+                    "Internal": False,
+                    "Attachable": True,
+                    "Labels": labels
+                }
+            )
+            logger.info(f"Created network: {name}")
+            return network
+        except Exception as e:
+            logger.error(e)
+            return None
 
 
 
@@ -62,6 +68,7 @@ class SdkDockerService:
                 name=name,
             )
 
+            logger.info(f"Created container: {name}")
             return container.id
         except Exception as e:
             logger.error(e)
@@ -143,19 +150,23 @@ class SdkDockerService:
             path: pathlib.Path | None = None,
             labels: dict[str, str] | None = None,
     ) -> str | None:
+        image = None
         if tag is None:
             logger.error("No tag provided")
             return None
 
         if path is None:
-            return await self.pull_image(tag)
+            image =  await self.pull_image(tag)
         else:
-            return await self.build_image(
+            image =  await self.build_image(
                 path=path,
                 tag=tag,
                 path_dockerfile=path_dockerfile,
                 labels=labels,
             )
+
+        logger.info(f"Created image: {image}")
+        return image
 
     async def pull_image(
             self,

@@ -146,8 +146,8 @@ class Producer:
             self._connection = None
             self._channel = None
 
-    async def __aenter__(self) -> "RabbitMQProducer":
-        await self.connect()
+    async def __aenter__(self) -> "Producer":
+        await self._connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:

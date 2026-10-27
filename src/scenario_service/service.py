@@ -7,7 +7,6 @@ import os
 import pathlib
 import uuid
 
-from src import setup_logging
 from src.docker_configurator import ContainerConfig
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.configurator import ComponentConfigurator
@@ -18,13 +17,13 @@ from src.scenario_service.dto.scenario_config import ScenarioConfig
 
 logger = logging.getLogger("my_app")
 
-setup_logging()
 
 COMPONENTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "components"
 
 class ScenarioStatus(enum.Enum):
     CREATED = 'CREATED'
     PENDING = 'PENDING'
+    INITIALIZING = 'INITIALIZING'
     RUNNING = 'RUNNING'
     STOPPED = 'STOPPED'
     ERROR = 'ERROR'
@@ -54,6 +53,65 @@ class ScenarioService:
         self.docker_service = docker_service
         self.configurator = ComponentConfigurator(docker_service)
 
+    async def initialize_scenario(
+            self,
+            scenario: Scenario,
+    ) -> Scenario:
+        scenario_id = scenario.id
+        scenario.status = ScenarioStatus.INITIALIZING
+        try:
+            self.configurator.broker_configure(scenario.config.broker_config)
+
+            network = await self.docker_service.create_network(
+                name=f"network-{scenario_id}",
+            )
+
+            broker_image = await self.docker_service.get_image(
+                tag="rabbitmq"
+            )
+
+            broker_container = await self.docker_service.create_container(
+                container_config=ContainerConfig(
+                    image=broker_image,
+                    name=f"rabbitmq-{scenario_id}",
+                    network_name=f"network-{scenario_id}",
+                )
+            )
+
+            scenario.config.producer_config.docker_args.extend([
+                "--broker-host", f"rabbitmq-{scenario_id}",
+                "--broker-port", "5672",
+            ])
+
+            producer_image_tag = await self.docker_service.get_image(
+                path=COMPONENTS_PATH / "consumers" / "rabbit_mq",
+                tag="producer-rabbitmq",
+                path_dockerfile="Dockerfile",
+                labels={"component": "producer"},
+            )
+            producer_container = await self.docker_service.create_container(
+                container_config=ContainerConfig(
+                    image=producer_image_tag,
+                    name=f"producer-{scenario_id}",
+                    network_name=f"network-{scenario_id}",
+                    cmd=scenario.config.producer_config.docker_args,
+                )
+            )
+
+            await network.connect({"Container": broker_container})
+            await network.connect({"Container": producer_container})
+
+            scenario.containers.append(producer_container)
+            scenario.containers.append(broker_container)
+
+            scenario.status = ScenarioStatus.PENDING
+        except Exception as e:
+            logger.error(e)
+            scenario.status = ScenarioStatus.ERROR
+
+        return scenario
+
+
     async def create_scenario(
             self,
             scenario_config: ScenarioConfig,
@@ -70,49 +128,6 @@ class ScenarioService:
             created_at=datetime.datetime.now(),
         )
 
-        self.configurator.broker_configure(scenario.config.broker_config)
-
-        network = await self.docker_service.create_network(
-            name=f"network-{scenario_id}",
-        )
-
-        broker_image = await self.docker_service.get_image(
-            tag="rabbitmq"
-        )
-        broker_container = await self.docker_service.create_container(
-            container_config=ContainerConfig(
-                image=broker_image,
-                name=f"rabbitmq-{scenario_id}",
-                network_name=f"network-{scenario_id}",
-            )
-        )
-
-        scenario_config.producer_config.docker_args.extend([
-            "--broker-host", f"rabbitmq-{scenario_id}",
-            "--broker-port", "5672",
-        ])
-
-        producer_image_tag = await self.docker_service.get_image(
-            path=COMPONENTS_PATH / "consumers" / "rabbit_mq",
-            tag="producer-rabbitmq",
-            path_dockerfile="Dockerfile",
-            labels={"component": "producer"},
-        )
-        producer_container = await self.docker_service.create_container(
-            container_config=ContainerConfig(
-                image=producer_image_tag,
-                name=f"producer-{scenario_id}",
-                network_name=f"network-{scenario_id}",
-                cmd=scenario_config.producer_config.docker_args,
-            )
-        )
-
-        await network.connect({"Container": broker_container})
-        await network.connect({"Container": producer_container})
-
-        scenario.containers.append(producer_container)
-        scenario.containers.append(broker_container)
-
         logger.info(f"Created scenario {scenario.id}")
         return scenario
 
@@ -121,51 +136,7 @@ class ScenarioService:
         scenario.status = ScenarioStatus.RUNNING
         return scenario.id
 
-    # async def get_scenarios_to_finish(self):
-    #     running_scenarios = list(filter(lambda scenario: scenario.status == ScenarioStatus.RUNNING, self.scenario_storage))
-    #     scenarios_to_finish = []
-    #
-    #     for scenario in running_scenarios:
-    #         current_datetime = datetime.datetime.now()
-    #         if current_datetime - scenario.created_at >= datetime.timedelta(seconds=self.TIMEOUT_SCENARIO_SECONDS):
-    #             scenarios_to_finish.append(scenario)
-    #
-    #     logger.info(f"Scenarios: {scenarios_to_finish} ready to finish")
-    #     return scenarios_to_finish
 
-    async def stop_scenario(self, scenario: Scenario) -> None:
-        scenario.status = ScenarioStatus.STOPPED
-        scenario.finished_at = datetime.datetime.now()
-
-        logger.info(f"Scenario: {scenario.id} stopped")
-
-    async def get_status(self):
-        msg = []
-        for scenario in self.scenario_storage:
-            scenario_text = "Scenario %s: status - %s" % (scenario.id, scenario.status)
-            msg.append(scenario_text)
-
-        return "\n".join(msg)
-
-
-
-
-    # async def background_task(
-    #         self,
-    # ):
-    #     while True:
-    #         await self.start_scenario()
-    #         timeout_scenario = await self.get_scenarios_to_finish()
-    #
-    #         for scenario in timeout_scenario:
-    #             await self.stop_scenario(scenario)
-    #
-    #         await asyncio.sleep(3)
-    #         print(await self.get_status())
-    #
-    # async def start_background(self):
-    #     task = asyncio.create_task(self.background_task())
-    #     await asyncio.gather(task, return_exceptions=True)
 
 
 async def main():
