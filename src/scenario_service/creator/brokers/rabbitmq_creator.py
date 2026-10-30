@@ -1,20 +1,34 @@
-import abc
-from typing import Generic
-
+from src.docker_configurator import ContainerConfig
+from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
-from src.scenario_service.creator.base.abstract_creator import BaseCreator, ConfigT
-from src.scenario_service.creator.dto.broker_config import RabbitMQConfig
-from src.scenario_service.dto.broker_config import Brokers
+from src.scenario_service.dto.broker_config import BrokerConfig
 
 
 class RabbitMQCreator(BaseBrokerCreator):
     def __init__(
             self,
+            docker_service: SdkDockerService,
     ):
-        pass
+        super().__init__(docker_service)
 
-    def configurate(
+    async def configurate(
             self,
-            config: RabbitMQConfig
+            scenario_id: str,
+            config: BrokerConfig,
+            *args,
+            **kwargs
     ):
-        pass
+        image = await self.docker_service.get_image(
+            tag="rabbitmq"
+        )
+
+        container = await self.docker_service.create_container(
+            container_config=ContainerConfig(
+                image=image,
+                name=f"rabbitmq-{scenario_id}",
+                network_name=f"network-{scenario_id}",
+                labels={"component": "broker"},
+            ),
+            extra_labels={"scenario_id": scenario_id},
+        )
+        return container

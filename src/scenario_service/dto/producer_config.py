@@ -2,6 +2,8 @@ import dataclasses
 import enum
 from typing import Any
 
+from .broker_config import BrokerConnection
+
 
 class LoadType(enum.Enum):
     linear = "linear"
@@ -22,6 +24,7 @@ class ProducerConfig:
     guarantee_type: GuaranteeType
     count: int
     docker_args: list[str]
+    broker_connection: BrokerConnection
 
 
 

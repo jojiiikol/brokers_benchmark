@@ -52,7 +52,7 @@ class Producer:
             queue_name: str = "scenario",
             broker_user: str = "guest",
             broker_password: str = "guest",
-            broker_host: str = "rabbitmq",
+            broker_host: str = "rabbit_mq",
             broker_port: str = "5672",
             tps: int = 1,
 

@@ -1,18 +1,22 @@
 import abc
 from typing import Generic
 
+from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_creator import BaseCreator, ConfigT
-from src.scenario_service.dto.broker_config import Brokers
 
 
 class BaseBrokerCreator(BaseCreator[ConfigT], Generic[ConfigT]):
     def __init__(
             self,
+            docker_service: SdkDockerService,
     ):
-        pass
+        self.docker_service = docker_service
 
-    def configurate(
+    async def configurate(
             self,
-            config: ConfigT
+            scenario_id: str,
+            config: ConfigT,
+            *args,
+            **kwargs
     ):
         pass

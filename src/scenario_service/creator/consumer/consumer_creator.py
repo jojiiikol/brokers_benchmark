@@ -1,4 +1,6 @@
+
 from src.scenario_service.creator.base.abstract_consumer import BaseConsumerCreator
+from src.scenario_service.dto.consumer_config import ConsumerConfig
 
 
 class ConsumerCreator(BaseConsumerCreator):
@@ -10,5 +12,11 @@ class ConsumerCreator(BaseConsumerCreator):
         super().__init__(*args, **kwargs)
         pass
 
-    def configurate(self):
-        pass
+    async def configurate(
+            self,
+            scenario_id: str,
+            config: ConsumerConfig,
+            *args,
+            **kwargs
+    ):
+        return await super().configurate(scenario_id, config, *args, **kwargs)

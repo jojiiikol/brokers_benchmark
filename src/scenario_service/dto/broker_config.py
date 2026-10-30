@@ -9,5 +9,13 @@ class Brokers(enum.Enum):
     NATS = "nats"
 
 @dataclasses.dataclass
+class BrokerConnection:
+    broker_type: Brokers
+    host: str = "localhost"
+    port: int = 5672
+    username: str = "guest"
+    password: str = "guest"
+
+@dataclasses.dataclass
 class BrokerConfig:
     broker_type: Brokers

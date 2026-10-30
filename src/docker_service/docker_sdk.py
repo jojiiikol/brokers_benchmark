@@ -3,15 +3,15 @@ import io
 import logging
 import pathlib
 import tarfile
-from itertools import starmap
+import time
 from typing import AsyncGenerator
 
 from aiodocker.containers import DockerContainer
 from aiodocker.networks import DockerNetwork
 
 from src import setup_logging
-from src.docker_configurator import ContainerConfig, build_docker_payload, PortBinding
-from .base import BaseDockerService
+from src.config import CONTAINERS_NAMESPACE
+from src.docker_configurator import ContainerConfig, build_docker_payload
 import aiodocker
 setup_logging()
 logger = logging.getLogger("DockerService")
@@ -34,34 +34,37 @@ class SdkDockerService:
             name: str,
             labels: dict[str, str] | None = None,
     ) -> DockerNetwork | None:
-        try:
-            network = await self.client.networks.create(
-                config={
-                    "Name": name,
-                    "Driver": "bridge",
-                    "CheckDuplicate": True,
-                    "Internal": False,
-                    "Attachable": True,
-                    "Labels": labels
-                }
-            )
-            logger.info(f"Created network: {name}")
-            return network
-        except Exception as e:
-            logger.error(e)
-            return None
-
-
+        network = await self.client.networks.create(
+            config={
+                "Name": name,
+                "Driver": "bridge",
+                "CheckDuplicate": True,
+                "Internal": False,
+                "Attachable": True,
+                "Labels": labels
+            }
+        )
+        logger.info(f"Created network: {name}")
+        return network
 
     async def create_container(
             self,
             container_config: ContainerConfig,
+            extra_labels: dict[str, str] | None = None,
     ) -> str | None:
         try:
+            container_config.labels.update(
+                {
+                    "namespace": CONTAINERS_NAMESPACE,
+                },
+                **extra_labels if extra_labels is not None else {},
+            )
+
             config, name, _ = build_docker_payload(container_config)
             if not config:
                 logger.warning("Config is not valid!")
                 return None
+
 
             container = await self.client.containers.create(
                 config=config,
@@ -76,11 +79,18 @@ class SdkDockerService:
 
     async def start_container(
             self,
-            container: DockerContainer,
+            container_id: str,
     ):
-        await self.client.containers.start(
-            container,
+        container = await self.get_container(
+            container_id=container_id,
         )
+
+        await container.start()
+        if await self.wait_container_ready(container.id):
+            logger.info(f"Container {container.id} started")
+            return
+
+        logger.error(f"Container {container.id} not started successfully")
 
     async def get_list_containers(
             self,
@@ -105,6 +115,29 @@ class SdkDockerService:
 
         return container
 
+    async def _get_resources_by_labels(
+            self,
+            resource_collection,
+            labels: dict[str, str],
+            all: bool = False,
+    ) -> list:
+
+        filters = {
+            "label": [
+                f"{key}={value}"
+                for key, value in labels.items()
+            ]
+        }
+        if all:
+            return await resource_collection.list(
+                filters=filters,
+                all=True,
+            )
+
+        return await resource_collection.list(
+            filters=filters,
+        )
+
     async def stop_container(
             self,
             container_id: str,
@@ -113,10 +146,48 @@ class SdkDockerService:
             container_id=container_id,
         )
         if container is None:
-            return None
+            return
 
         await container.stop()
         await container.delete()
+
+    async def clear_resources(self):
+        containers = await self._get_resources_by_labels(
+            resource_collection=self.client.containers,
+            labels={"namespace": CONTAINERS_NAMESPACE},
+            all=True,
+        )
+
+        networks = await self._get_resources_by_labels(
+            resource_collection=self.client.networks,
+            labels={"namespace": CONTAINERS_NAMESPACE},
+        )
+
+        # Удаляем контейнеры
+        for container in containers:
+            try:
+                await container.delete(force=True)
+                logger.info("Container %s deleted", container.id)
+            except Exception:
+                logger.exception(
+                    "Failed to delete container %s",
+                    container.id,
+                )
+
+        # Удаляем сети
+        for network in networks:
+            network_id = network["Id"]
+
+            try:
+                network_object = await self.client.networks.get(network_id)
+                await network_object.delete()
+
+                logger.info("Network %s deleted", network_id)
+            except Exception:
+                logger.exception(
+                    "Failed to delete network %s",
+                    network_id,
+                )
 
     def _create_build_context(self, context_path: pathlib.Path) -> io.BytesIO:
         archive = io.BytesIO()
@@ -172,13 +243,9 @@ class SdkDockerService:
             self,
             tag: str,
     ):
-        try:
-            stream = self.client.images.pull(tag, stream=True)
-            await self._image_logs(stream)
-            return tag
-        except Exception as e:
-            logger.error(e)
-            return None
+        stream = self.client.images.pull(tag, stream=True)
+        await self._image_logs(stream)
+        return tag
 
     async def build_image(
             self,
@@ -189,33 +256,68 @@ class SdkDockerService:
     ) -> str | None:
         # Надо понять как строить путь
         # Генерция тега
-        try:
-            archive = self._create_build_context(path)
-            build_stream = self.client.images.build(
-                fileobj=archive,
-                path_dockerfile=path_dockerfile,
-                encoding="identity",
-                tag=tag,
-                labels=labels,
-                stream=True,
-            )
-            await self._image_logs(build_stream)
-            return tag
+        archive = self._create_build_context(path)
+        build_stream = self.client.images.build(
+            fileobj=archive,
+            path_dockerfile=path_dockerfile,
+            encoding="identity",
+            tag=tag,
+            labels=labels,
+            stream=True,
+        )
+        await self._image_logs(build_stream)
+        return tag
 
-        except Exception as e:
-            logger.error(e)
-            return None
+    async def get_container_state(
+            self,
+            container: DockerContainer,
+    ) -> dict:
+        info = await container.show()
+
+        state = info.get("State", {})
+
+        return {
+            "status": state.get("Status"),
+            "running": state.get("Running"),
+            "exit_code": state.get("ExitCode"),
+        }
+
+    async def wait_container_ready(
+            self,
+            container_id: str,
+            timeout: float = 60,
+            interval: float = 2,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+
+        while time.monotonic() < deadline:
+            container = await self.get_container(container_id)
+
+            if container is None:
+                return False
+
+            state = await self.get_container_state(container)
+
+            if state["status"] in ("exited", "dead"):
+                return False
+
+            if state["running"]:
+                return True
+
+            await asyncio.sleep(interval)
+
+        return False
 
 
 
 
 async def main():
     service = SdkDockerService()
-    print(pathlib.Path(__file__).resolve().parent.parent / "components" / "consumers" / "rabbit_mq")
+    print(pathlib.Path(__file__).resolve().parent.parent / "components" / "producer" / "rabbit_mq")
     await service.open_client()
     a = await service.build_image(
-        path=pathlib.Path(__file__).resolve().parent.parent / "components" / "consumers" / "rabbit_mq",
-        tag="rabbit_mq-consumers",
+        path=pathlib.Path(__file__).resolve().parent.parent / "components" / "producer" / "rabbit_mq",
+        tag="rabbit_mq-producer",
         path_dockerfile="Dockerfile",
         labels=None
     )
