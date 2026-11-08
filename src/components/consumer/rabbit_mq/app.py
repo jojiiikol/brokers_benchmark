@@ -9,6 +9,7 @@ import aio_pika
 from aiormq import AMQPConnectionError
 from dotenv import load_dotenv
 import argparse
+import math
 load_dotenv()
 
 LOGGING_CONFIG = {
@@ -41,6 +42,41 @@ logging.config.dictConfig(LOGGING_CONFIG)
 
 logger = logging.getLogger(__name__)
 
+
+class LatencyMetrics:
+    """In-memory percentile aggregation for one measurement phase.
+
+    Percentiles use linear interpolation between adjacent sorted samples. This
+    keeps p50/p75/p95/p99 stable and well-defined even for small samples.
+    """
+
+    PERCENTILES = (50, 75, 95, 99)
+
+    def __init__(self) -> None:
+        self._values_ms: list[float] = []
+
+    def observe(self, latency_ms: float) -> None:
+        self._values_ms.append(latency_ms)
+
+    def summary(self) -> dict[str, float | int | None]:
+        result: dict[str, float | int | None] = {"count": len(self._values_ms)}
+        for percentile in self.PERCENTILES:
+            result[f"p{percentile}_ms"] = self._percentile(percentile)
+        return result
+
+    def _percentile(self, percentile: int) -> float | None:
+        if not self._values_ms:
+            return None
+
+        values = sorted(self._values_ms)
+        rank = (len(values) - 1) * percentile / 100
+        lower = math.floor(rank)
+        upper = math.ceil(rank)
+        if lower == upper:
+            return values[lower]
+        return values[lower] + (values[upper] - values[lower]) * (rank - lower)
+
+
 class Consumer:
     CONNECTION_URL: str = ""
 
@@ -52,8 +88,11 @@ class Consumer:
             broker_password: str = "guest",
             broker_host: str = "rabbit_mq",
             broker_port: str = "5672",
+            metrics_report_interval_seconds: float = 5,
 
     ):
+        if metrics_report_interval_seconds <= 0:
+            raise ValueError("metrics_report_interval_seconds must be greater than zero")
         self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
 
         self._connection = None
@@ -62,6 +101,9 @@ class Consumer:
 
 
         self.queue_name = queue_name
+        self.metrics = LatencyMetrics()
+        self.metrics_report_interval_seconds = metrics_report_interval_seconds
+        self._last_metrics_report_at: float | None = None
 
 
     async def _connect(self):
@@ -102,18 +144,52 @@ class Consumer:
             raise RuntimeError("Consumer is not connected")
 
 
-        async with self._queue.iterator() as queue_iter:
-            async for message in queue_iter:
-                async with message.process():
-                    received_at = time.monotonic_ns()
-                    decode_message = json.loads(message.body.decode("utf-8"))
+        loop = asyncio.get_running_loop()
+        self._last_metrics_report_at = loop.time()
+        try:
+            async with self._queue.iterator() as queue_iter:
+                async for message in queue_iter:
+                    async with message.process():
+                        received_at = time.monotonic_ns()
+                        decode_message = json.loads(message.body.decode("utf-8"))
 
-                    latency = self.latency(decode_message, received_at)
+                        latency = self.latency(decode_message, received_at)
+                        phase = decode_message.get("phase", "unknown")
+                        if phase == "measurement" and latency is not None:
+                            self.metrics.observe(latency)
+                            self._report_metrics_if_due(loop.time())
 
-                    logging.info(f"Message: {message.body[:100]} | Latency: {latency}")
+                        logger.debug(
+                            "Phase=%s message=%s latency_ms=%s",
+                            phase,
+                            message.body[:100],
+                            latency,
+                        )
+        finally:
+            self._log_metrics(final=True)
 
-                    if self._queue.name in message.body.decode():
-                        break
+    def _report_metrics_if_due(self, now: float) -> None:
+        if self._last_metrics_report_at is None:
+            self._last_metrics_report_at = now
+        if now - self._last_metrics_report_at >= self.metrics_report_interval_seconds:
+            self._log_metrics(final=False)
+            self._last_metrics_report_at = now
+
+    def _log_metrics(self, *, final: bool) -> None:
+        summary = self.metrics.summary()
+        if not summary["count"]:
+            return
+        prefix = "Final latency metrics" if final else "Latency metrics"
+        logger.info(
+            "%s | samples=%s | p50_ms=%.3f | p75_ms=%.3f | "
+            "p95_ms=%.3f | p99_ms=%.3f",
+            prefix,
+            summary["count"],
+            summary["p50_ms"],
+            summary["p75_ms"],
+            summary["p95_ms"],
+            summary["p99_ms"],
+        )
 
 
     async def close(self) -> None:
@@ -144,12 +220,17 @@ async def main():
     parser.add_argument(
         "--broker-port", type=str, default="5672", required=False, help="RabbitMQ broker port"
     )
+    parser.add_argument(
+        "--metrics-report-interval-seconds", type=float, default=5,
+        help="How often to log measurement latency percentiles",
+    )
     args = parser.parse_args()
 
     consumer = Consumer(
         queue_name="scenario",
         broker_host=args.broker_host,
         broker_port=args.broker_port,
+        metrics_report_interval_seconds=args.metrics_report_interval_seconds,
     )
     await consumer._connect()
     await consumer.declare_queue()

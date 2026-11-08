@@ -80,17 +80,20 @@ class SdkDockerService:
     async def start_container(
             self,
             container_id: str,
-    ):
+    ) -> bool:
         container = await self.get_container(
             container_id=container_id,
         )
+        if container is None:
+            return False
 
         await container.start()
         if await self.wait_container_ready(container.id):
             logger.info(f"Container {container.id} started")
-            return
+            return True
 
         logger.error(f"Container {container.id} not started successfully")
+        return False
 
     async def get_list_containers(
             self,
@@ -188,6 +191,41 @@ class SdkDockerService:
                     "Failed to delete network %s",
                     network_id,
                 )
+
+    async def clear_scenario_resources(self, scenario_id: str) -> None:
+        """Delete all Docker resources belonging to one scenario.
+
+        Labels make this operation safe to repeat after a partial initialization
+        or an interrupted shutdown.
+        """
+        labels = {
+            "namespace": CONTAINERS_NAMESPACE,
+            "scenario_id": scenario_id,
+        }
+        containers = await self._get_resources_by_labels(
+            resource_collection=self.client.containers,
+            labels=labels,
+            all=True,
+        )
+        for container in containers:
+            try:
+                await container.delete(force=True)
+                logger.info("Container %s deleted", container.id)
+            except Exception:
+                logger.exception("Failed to delete container %s", container.id)
+
+        networks = await self._get_resources_by_labels(
+            resource_collection=self.client.networks,
+            labels=labels,
+        )
+        for network in networks:
+            network_id = network["Id"]
+            try:
+                network_object = await self.client.networks.get(network_id)
+                await network_object.delete()
+                logger.info("Network %s deleted", network_id)
+            except Exception:
+                logger.exception("Failed to delete network %s", network_id)
 
     def _create_build_context(self, context_path: pathlib.Path) -> io.BytesIO:
         archive = io.BytesIO()

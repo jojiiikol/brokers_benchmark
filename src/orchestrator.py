@@ -19,6 +19,7 @@ class Orchestrator:
         self.docker_service = SdkDockerService()
         self.scenario_service = ScenarioService(self.docker_service)
         self.scenario_storage: list = []
+        self.scenario_tasks: dict[str, asyncio.Task] = {}
 
         self.create_image_lock = asyncio.Lock()
 
@@ -26,7 +27,12 @@ class Orchestrator:
     def scenario_running_count(self) -> int:
         running_scenarios = list(
             filter(
-                lambda scenario: scenario.status == ScenarioStatus.RUNNING,
+                lambda scenario: scenario.status in {
+                    ScenarioStatus.STARTING,
+                    ScenarioStatus.WARMING_UP,
+                    ScenarioStatus.RUNNING,
+                    ScenarioStatus.STOPPING,
+                },
                 self.scenario_storage
             )
         )
@@ -71,10 +77,12 @@ class Orchestrator:
         if older_scenario is None:
             return
 
-        scenario_id = await self.scenario_service.start_scenario(
-            scenario=older_scenario,
+        task = asyncio.create_task(
+            self.scenario_service.start_scenario(older_scenario),
+            name=f"scenario-{older_scenario.id}",
         )
-        return scenario_id
+        self.scenario_tasks[older_scenario.id] = task
+        return older_scenario.id
 
     async def _initialize_scenario(self):
         async with self.create_image_lock:
@@ -88,12 +96,25 @@ class Orchestrator:
 
     async def _process(self) -> None:
         while True:
+            self._collect_finished_tasks()
             logger.info(self.get_info())
             await self._initialize_scenario()
             await self.start_scenario()
 
 
             await asyncio.sleep(3)
+
+    def _collect_finished_tasks(self) -> None:
+        for scenario_id, task in list(self.scenario_tasks.items()):
+            if not task.done():
+                continue
+            self.scenario_tasks.pop(scenario_id)
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                logger.info("Scenario %s was cancelled", scenario_id)
+            except Exception:
+                logger.exception("Scenario %s task failed", scenario_id)
 
     async def run(self):
         task = asyncio.create_task(self._process())
@@ -131,9 +152,9 @@ async def main():
                 producer_config=ProducerConfig(
                     load_type=LoadType.linear,
                     payload_size=1024,
-                    rps=5,
+                    rps=100,
                     guarantee_type=GuaranteeType.EXACTLY_ONCE,
-                    count=1,
+                    count=5,
                     docker_args=[],
                     broker_connection=BrokerConnection(
                         broker_type=Brokers.RABBITMQ,
@@ -142,7 +163,8 @@ async def main():
                         host="",
                         port=0,
                     )
-                )
+                ),
+                warmup_seconds=30,
             )
         )
         await orchestrator.run()

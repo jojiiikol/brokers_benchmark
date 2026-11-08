@@ -33,10 +33,11 @@ class ScenarioStatus(enum.Enum):
     INITIALIZING = 'INITIALIZING'
     PENDING = 'PENDING'
     STARTING = 'STARTING'
+    WARMING_UP = 'WARMING_UP'
     RUNNING = 'RUNNING'
-    STOPPED = 'STOPPED'
+    STOPPING = 'STOPPING'
     ERROR = 'ERROR'
-    COMPLETED = 'COMPLETED'
+    FINISHED = 'FINISHED'
 
 @dataclasses.dataclass
 class Scenario:
@@ -47,7 +48,15 @@ class Scenario:
     finished_at: datetime.datetime | None
 
     status: ScenarioStatus = ScenarioStatus.CREATED
-    created_at: datetime.datetime = datetime.datetime.now()
+    created_at: datetime.datetime = dataclasses.field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )
+    started_at: datetime.datetime | None = None
+    warmup_finished_at: datetime.datetime | None = None
+    error: str | None = None
+    container_ids_by_role: dict[str, list[str]] = dataclasses.field(
+        default_factory=lambda: {"broker": [], "consumer": [], "producer": []}
+    )
 
 class ScenarioService:
     MAX_RUNNING_SCENARIO_COUNT: int = 5
@@ -56,14 +65,14 @@ class ScenarioService:
     def __init__(
             self,
             # configurator: ComponentConfigurator,
-            docker_service: SdkDockerService = SdkDockerService(),
+            docker_service: SdkDockerService | None = None,
 
     ):
-        self.docker_service = docker_service
+        self.docker_service = docker_service or SdkDockerService()
         # self.configurator = ComponentConfigurator(docker_service)
-        self.producer_creator: BaseProducerCreator = ProducerCreator(docker_service)
-        self.consumer_creator: BaseConsumerCreator = ConsumerCreator(docker_service)
-        self.broker_creator: BaseBrokerCreator = RabbitMQCreator(docker_service)
+        self.producer_creator: BaseProducerCreator = ProducerCreator(self.docker_service)
+        self.consumer_creator: BaseConsumerCreator = ConsumerCreator(self.docker_service)
+        self.broker_creator: BaseBrokerCreator = RabbitMQCreator(self.docker_service)
 
     def _component_count(
             self,
@@ -83,49 +92,65 @@ class ScenarioService:
 
             network = await self.docker_service.create_network(
                 name=f"network-{scenario_id}",
-                labels={"namespace": CONTAINERS_NAMESPACE},
+                labels={
+                    "namespace": CONTAINERS_NAMESPACE,
+                    "scenario_id": scenario_id,
+                },
             )
 
             broker_container = await self.broker_creator.configurate(
                 scenario_id=scenario_id,
                 config=scenario.config.broker_config,
             )
+            scenario.containers.append(broker_container)
+            scenario.container_ids_by_role["broker"].append(broker_container)
 
-            scenario.config.producer_config.docker_args.extend([
+            producer_config = dataclasses.replace(
+                scenario.config.producer_config,
+                docker_args=[*scenario.config.producer_config.docker_args,
                 "--broker-host", f"rabbitmq-{scenario_id}",
                 "--broker-port", "5672",
-            ])
-
-            producer_container = await self.producer_creator.configurate(
-                scenario_id=scenario_id,
-                config=scenario.config.producer_config,
+                "--warmup-seconds", str(scenario.config.warmup_seconds),
+                "--duration-seconds", str(scenario.config.duration_seconds),
+                ],
             )
 
-            scenario.config.consumer_config.docker_args.extend([
+            producer_containers = await self.producer_creator.configurate(
+                scenario_id=scenario_id,
+                config=producer_config,
+            )
+            scenario.containers.extend(producer_containers)
+            scenario.container_ids_by_role["producer"].extend(producer_containers)
+
+            consumer_config = dataclasses.replace(
+                scenario.config.consumer_config,
+                docker_args=[*scenario.config.consumer_config.docker_args,
                 "--broker-host", f"rabbitmq-{scenario_id}",
                 "--broker-port", "5672",
-            ])
+                ],
+            )
 
             consumer_container = await self.consumer_creator.configurate(
                 scenario_id=scenario_id,
-                config=scenario.config.consumer_config,
+                config=consumer_config,
             )
+            scenario.containers.append(consumer_container)
+            scenario.container_ids_by_role["consumer"].append(consumer_container)
 
             await network.connect({"Container": broker_container})
-            await network.connect({"Container": producer_container})
+            for producer_container in producer_containers:
+                await network.connect({"Container": producer_container})
             await network.connect({"Container": consumer_container})
-
-            scenario.containers.append(producer_container)
-            scenario.containers.append(broker_container)
-            scenario.containers.append(consumer_container)
 
             if not await self._validate_scenario(scenario):
                 raise ValueError("Component in scenario not built")
 
             scenario.status = ScenarioStatus.PENDING
         except Exception as e:
-            logger.error(e)
+            logger.exception("Failed to initialize scenario %s", scenario.id)
+            scenario.error = str(e)
             scenario.status = ScenarioStatus.ERROR
+            await self.docker_service.clear_scenario_resources(scenario.id)
 
         return scenario
 
@@ -173,7 +198,7 @@ class ScenarioService:
             config=scenario_config,
             finished_at=None,
             status=ScenarioStatus.CREATED,
-            created_at=datetime.datetime.now(),
+            created_at=datetime.datetime.now(datetime.UTC),
         )
 
         logger.info(f"Created scenario {scenario.id}")
@@ -181,18 +206,53 @@ class ScenarioService:
 
 
     async def start_scenario(self, scenario: Scenario) -> str | None:
+        """Run one scenario through warm-up, measurement and shutdown."""
         scenario.status = ScenarioStatus.STARTING
+        scenario.started_at = datetime.datetime.now(datetime.UTC)
         try:
-            container_ids = scenario.containers
-            for container_id in container_ids:
-                if await self.docker_service.start_container(container_id): # Убрать последовательность. Брокер -> Компоненты
-                    raise ValueError("Container not started")
+            await self._start_role(scenario, "broker")
+            # The consumer must be connected before the producer sends either
+            # warm-up or measured messages.
+            await self._start_role(scenario, "consumer")
+            await self._start_role(scenario, "producer")
+
+            scenario.status = ScenarioStatus.WARMING_UP
+            logger.info(
+                "Scenario %s is warming up with message traffic for %s seconds",
+                scenario.id,
+                scenario.config.warmup_seconds,
+            )
+            await asyncio.sleep(scenario.config.warmup_seconds)
+            scenario.warmup_finished_at = datetime.datetime.now(datetime.UTC)
 
             scenario.status = ScenarioStatus.RUNNING
+            logger.info("Scenario %s is running for %s seconds", scenario.id,
+                        scenario.config.duration_seconds)
+            await asyncio.sleep(scenario.config.duration_seconds)
+
+            scenario.status = ScenarioStatus.STOPPING
+            await self.docker_service.clear_scenario_resources(scenario.id)
+            scenario.status = ScenarioStatus.FINISHED
+            scenario.finished_at = datetime.datetime.now(datetime.UTC)
             return scenario.id
-        except Exception as e:
-            logger.error(e)
+        except asyncio.CancelledError:
+            scenario.status = ScenarioStatus.STOPPING
+            await self.docker_service.clear_scenario_resources(scenario.id)
             scenario.status = ScenarioStatus.ERROR
+            scenario.error = "Scenario task was cancelled"
+            scenario.finished_at = datetime.datetime.now(datetime.UTC)
+            raise
+        except Exception as e:
+            logger.exception("Scenario %s failed", scenario.id)
+            scenario.status = ScenarioStatus.ERROR
+            scenario.error = str(e)
+            await self.docker_service.clear_scenario_resources(scenario.id)
+            scenario.finished_at = datetime.datetime.now(datetime.UTC)
+
+    async def _start_role(self, scenario: Scenario, role: str) -> None:
+        for container_id in scenario.container_ids_by_role[role]:
+            if not await self.docker_service.start_container(container_id):
+                raise RuntimeError(f"Failed to start {role} container {container_id}")
 
 
 

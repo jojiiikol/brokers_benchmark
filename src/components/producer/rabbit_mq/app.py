@@ -99,13 +99,25 @@ class Producer:
             durable=True,
         )
 
-    async def publish(self, data: dict[str, Any]) -> None:
+    async def publish(
+            self,
+            data: dict[str, Any] | None = None,
+            *,
+            phase: str = "measurement",
+    ) -> None:
         if self._channel is None:
             raise RuntimeError("Producer is not connected")
 
-        data["sent_at"] = time.monotonic_ns()
+        if data is None:
+            body = self._create_payload(phase, time.monotonic_ns())
+        else:
+            # Compatibility path for callers that provide their own payload.
+            # The benchmark path above is the only one with an exact body size.
+            data["sent_at"] = time.monotonic_ns()
+            body = json.dumps(data, separators=(",", ":")).encode("utf-8")
+
         message = aio_pika.Message(
-            body=json.dumps(data).encode(),
+            body=body,
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             content_type="application/json",
         )
@@ -133,30 +145,53 @@ class Producer:
             next_publish += self._interval
 
 
-    async def publish_forever(self) -> None:
+    async def publish_for(self, duration_seconds: float, phase: str) -> None:
+        """Publish at the configured rate for one benchmark phase."""
         loop = asyncio.get_running_loop()
         next_publish = loop.time()
+        deadline = next_publish + duration_seconds
 
-
-        while True:
+        while next_publish < deadline:
             delay = next_publish - loop.time()
 
             if delay > 0:
                 await asyncio.sleep(delay)
 
-            data = self._create_payload()
-            await self.publish(data)
+            await self.publish(phase=phase)
 
             next_publish += self._interval
 
-    def _create_payload(self):
-        # empty message size - 72 bytes
-        factor = self.MESSAGE_SIZE * 1024 - 72
-        text = "a" * factor
+    async def run_benchmark(
+            self,
+            warmup_seconds: float,
+            duration_seconds: float,
+    ) -> None:
+        await self.publish_for(warmup_seconds, phase="warmup")
+        await self.publish_for(duration_seconds, phase="measurement")
+
+    def _create_payload(self, phase: str, sent_at: int) -> bytes:
+        """Build a JSON message whose complete UTF-8 body has an exact size."""
+        target_size = self.MESSAGE_SIZE * 1024
         payload = {
-            "data": text
+            "data": "",
+            "phase": phase,
+            "sent_at": sent_at,
         }
-        return payload
+        empty_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        data_size = target_size - len(empty_body)
+        if data_size < 0:
+            raise ValueError(
+                f"payload_size={self.MESSAGE_SIZE} KiB is too small: "
+                f"message metadata requires {len(empty_body)} bytes"
+            )
+
+        payload["data"] = "a" * data_size
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        if len(body) != target_size:
+            raise RuntimeError(
+                f"Expected a {target_size}-byte message, got {len(body)} bytes"
+            )
+        return body
 
 
 
@@ -193,7 +228,23 @@ async def main():
     parser.add_argument(
         "--payload_size", type=int, default=1024, help="Payload size for message sending in Kbytes"
     )
+    parser.add_argument(
+        "--warmup-seconds", type=float, default=0,
+        help="Duration of the unmeasured message-flow warm-up phase",
+    )
+    parser.add_argument(
+        "--duration-seconds", type=float, required=True,
+        help="Duration of the measured message-flow phase",
+    )
     args = parser.parse_args()
+    if args.rps <= 0:
+        parser.error("--rps must be greater than zero")
+    if args.payload_size <= 0:
+        parser.error("--payload_size must be greater than zero")
+    if args.warmup_seconds < 0:
+        parser.error("--warmup-seconds must be greater than or equal to zero")
+    if args.duration_seconds <= 0:
+        parser.error("--duration-seconds must be greater than zero")
 
     producer = Producer(
         queue_name="scenario",
@@ -205,7 +256,10 @@ async def main():
     )
     await producer._connect()
     await producer.declare_queue()
-    await producer.publish_forever()
+    await producer.run_benchmark(
+        warmup_seconds=args.warmup_seconds,
+        duration_seconds=args.duration_seconds,
+    )
 
 
 if __name__ == "__main__":

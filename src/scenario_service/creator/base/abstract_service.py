@@ -16,15 +16,16 @@ class BaseServiceCreator(BaseCreator):
     ):
         super().__init__(*args, **kwargs)
         self.docker_service = docker_service
+        self._image_tags: dict[tuple[str, str], str] = {}
 
     async def configurate(
             self,
             scenario_id: str,
             config: ConfigT,
+            instance_index: int | None = None,
             *args,
             **kwargs
     ):
-        await super().configurate(scenario_id, config, *args, **kwargs)
         components = {
             ProducerConfig: "producer",
             ConsumerConfig: "consumer",
@@ -34,18 +35,26 @@ class BaseServiceCreator(BaseCreator):
         if component_type is None:
             raise ValueError("Config type not supported")
 
-        image_tag = await self.docker_service.get_image(
-            path=self.COMPONENTS_PATH / component_type / config.broker_connection.broker_type.value,
-            tag=f"{component_type}-{config.broker_connection.broker_type.value}",
-            path_dockerfile="Dockerfile",
-            labels={"component": component_type},
-        )
+        broker_type = config.broker_connection.broker_type.value
+        image_key = (component_type, broker_type)
+        image_tag = self._image_tags.get(image_key)
+        if image_tag is None:
+            image_tag = await self.docker_service.get_image(
+                path=self.COMPONENTS_PATH / component_type / broker_type,
+                tag=f"{component_type}-{broker_type}",
+                path_dockerfile="Dockerfile",
+                labels={"component": component_type},
+            )
+            self._image_tags[image_key] = image_tag
+
+        instance_suffix = "" if instance_index is None else f"-{instance_index + 1}"
         container = await self.docker_service.create_container(
             container_config=ContainerConfig(
                 image=image_tag,
-                name=f"{component_type}-{scenario_id}",
+                name=f"{component_type}-{scenario_id}{instance_suffix}",
                 network_name=f"network-{scenario_id}",
                 cmd=config.docker_args,
+                labels={"component": component_type},
             ),
             extra_labels={"scenario_id": scenario_id},
         )
