@@ -1,0 +1,269 @@
+import asyncio
+import json
+import logging
+import logging.config
+import os
+import sys
+import time
+from typing import Any
+
+import aio_pika
+from aiormq import AMQPConnectionError
+from dotenv import load_dotenv
+import argparse
+load_dotenv()
+
+LOGGING_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": (
+                "%(asctime)s | %(levelname)s | "
+                "%(name)s:%(lineno)d | %(message)s"
+            ),
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "DEBUG",
+            "formatter": "standard",
+            "stream": "ext://sys.stdout",
+        },
+    },
+    "root": {
+        "level": "INFO",
+        "handlers": ["console"],
+    },
+}
+
+logging.config.dictConfig(LOGGING_CONFIG)
+
+logger = logging.getLogger(__name__)
+
+class Producer:
+    CONNECTION_URL: str = ""
+    TPS: int = 1
+    MESSAGE_SIZE: int = 1024
+
+
+    def __init__(
+            self,
+            queue_name: str = "scenario",
+            broker_user: str = "guest",
+            broker_password: str = "guest",
+            broker_host: str = "rabbit_mq",
+            broker_port: str = "5672",
+
+            tps: int = 1,
+            message_size: int = 1024
+
+    ):
+        self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
+
+        self._connection = None
+        self._channel = None
+
+        self.TPS = tps
+        self.MESSAGE_SIZE = message_size
+
+        self._interval = 1.0 / self.TPS
+
+        self.queue_name = queue_name
+
+
+    async def _connect(self):
+        if self._connection is not None:
+            return self._connection
+
+        attempts = 5
+        while attempts > 0:
+            try:
+                self._connection = await aio_pika.connect_robust(self.CONNECTION_URL)
+                self._channel = await self._connection.channel()
+                return
+            except AMQPConnectionError:
+                logging.warning("No connection, retrying...")
+                await asyncio.sleep(5)
+            attempts -= 1
+        raise Exception("Connection failed")
+
+    async def declare_queue(self) -> None:
+        if self._channel is None:
+            raise RuntimeError("Producer is not connected")
+
+        await self._channel.declare_queue(
+            name=self.queue_name,
+            durable=True,
+        )
+
+    async def publish(
+            self,
+            data: dict[str, Any] | None = None,
+            *,
+            phase: str = "measurement",
+    ) -> None:
+        if self._channel is None:
+            raise RuntimeError("Producer is not connected")
+
+        if data is None:
+            body = self._create_payload(phase, time.monotonic_ns())
+        else:
+            # Compatibility path for callers that provide their own payload.
+            # The benchmark path above is the only one with an exact body size.
+            data["sent_at"] = time.monotonic_ns()
+            body = json.dumps(data, separators=(",", ":")).encode("utf-8")
+
+        message = aio_pika.Message(
+            body=body,
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            content_type="application/json",
+        )
+
+        await self._channel.default_exchange.publish(
+            message,
+            routing_key=self.queue_name,
+        )
+        logger.info("Message published")
+
+    async def publish_many(
+            self,
+            messages: list[dict[str, Any]],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        next_publish = loop.time()
+
+        for data in messages:
+            delay = next_publish - loop.time()
+
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            await self.publish(data)
+            next_publish += self._interval
+
+
+    async def publish_for(self, duration_seconds: float, phase: str) -> None:
+        """Publish at the configured rate for one benchmark phase."""
+        loop = asyncio.get_running_loop()
+        next_publish = loop.time()
+        deadline = next_publish + duration_seconds
+
+        while next_publish < deadline:
+            delay = next_publish - loop.time()
+
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            await self.publish(phase=phase)
+
+            next_publish += self._interval
+
+    async def run_benchmark(
+            self,
+            warmup_seconds: float,
+            duration_seconds: float,
+    ) -> None:
+        await self.publish_for(warmup_seconds, phase="warmup")
+        await self.publish_for(duration_seconds, phase="measurement")
+
+    def _create_payload(self, phase: str, sent_at: int) -> bytes:
+        """Build a JSON message whose complete UTF-8 body has an exact size."""
+        target_size = self.MESSAGE_SIZE * 1024
+        payload = {
+            "data": "",
+            "phase": phase,
+            "sent_at": sent_at,
+        }
+        empty_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        data_size = target_size - len(empty_body)
+        if data_size < 0:
+            raise ValueError(
+                f"payload_size={self.MESSAGE_SIZE} KiB is too small: "
+                f"message metadata requires {len(empty_body)} bytes"
+            )
+
+        payload["data"] = "a" * data_size
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        if len(body) != target_size:
+            raise RuntimeError(
+                f"Expected a {target_size}-byte message, got {len(body)} bytes"
+            )
+        return body
+
+
+
+    async def close(self) -> None:
+        if self._connection is not None:
+            await self._connection.close()
+            self._connection = None
+            self._channel = None
+
+    async def __aenter__(self) -> "Producer":
+        await self._connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
+
+
+
+
+
+
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--broker-host", type=str, required=True, help="RabbitMQ broker host"
+    )
+    parser.add_argument(
+        "--broker-port", type=str, default="5672", required=False, help="RabbitMQ broker port"
+    )
+    parser.add_argument(
+        "--rps", type=int, default=1, help="Request per second for message sending"
+    )
+    parser.add_argument(
+        "--payload_size", type=int, default=1024, help="Payload size for message sending in Kbytes"
+    )
+    parser.add_argument(
+        "--warmup-seconds", type=float, default=0,
+        help="Duration of the unmeasured message-flow warm-up phase",
+    )
+    parser.add_argument(
+        "--duration-seconds", type=float, required=True,
+        help="Duration of the measured message-flow phase",
+    )
+    args = parser.parse_args()
+    if args.rps <= 0:
+        parser.error("--rps must be greater than zero")
+    if args.payload_size <= 0:
+        parser.error("--payload_size must be greater than zero")
+    if args.warmup_seconds < 0:
+        parser.error("--warmup-seconds must be greater than or equal to zero")
+    if args.duration_seconds <= 0:
+        parser.error("--duration-seconds must be greater than zero")
+
+    producer = Producer(
+        queue_name="scenario",
+        broker_host=args.broker_host,
+        broker_port=args.broker_port,
+
+        message_size=args.payload_size,
+        tps=int(args.rps),
+    )
+    await producer._connect()
+    await producer.declare_queue()
+    await producer.run_benchmark(
+        warmup_seconds=args.warmup_seconds,
+        duration_seconds=args.duration_seconds,
+    )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+

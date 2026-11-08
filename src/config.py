@@ -1,0 +1,1 @@
+CONTAINERS_NAMESPACE = "brokers_benchmark"
