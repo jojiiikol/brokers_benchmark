@@ -89,10 +89,13 @@ class Consumer:
             broker_host: str = "rabbit_mq",
             broker_port: str = "5672",
             metrics_report_interval_seconds: float = 5,
+            interaction_mode: str = "work_queue",
 
     ):
         if metrics_report_interval_seconds <= 0:
             raise ValueError("metrics_report_interval_seconds must be greater than zero")
+        if interaction_mode not in ("work_queue", "pub_sub"):
+            raise ValueError(f"Unsupported interaction mode: {interaction_mode}")
         self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
 
         self._connection = None
@@ -101,6 +104,7 @@ class Consumer:
 
 
         self.queue_name = queue_name
+        self.interaction_mode = interaction_mode
         self.metrics = LatencyMetrics()
         self.metrics_report_interval_seconds = metrics_report_interval_seconds
         self._last_metrics_report_at: float | None = None
@@ -126,10 +130,23 @@ class Consumer:
         if self._channel is None:
             raise RuntimeError("Consumer is not connected")
 
-        self._queue = await self._channel.declare_queue(
-            name=self.queue_name,
-            durable=True,
-        )
+        if self.interaction_mode == "pub_sub":
+            exchange = await self._channel.declare_exchange(
+                name=self.queue_name,
+                type=aio_pika.ExchangeType.FANOUT,
+                durable=True,
+            )
+            self._queue = await self._channel.declare_queue(
+                name="",
+                exclusive=True,
+                auto_delete=True,
+            )
+            await self._queue.bind(exchange)
+        else:
+            self._queue = await self._channel.declare_queue(
+                name=self.queue_name,
+                durable=True,
+            )
 
     def latency(self, message: dict[str, Any], received_at: int) -> float | None:
         sent_at: float | None  = message.get("sent_at", None)
@@ -224,6 +241,10 @@ async def main():
         "--metrics-report-interval-seconds", type=float, default=5,
         help="How often to log measurement latency percentiles",
     )
+    parser.add_argument(
+        "--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue",
+        help="RabbitMQ delivery topology",
+    )
     args = parser.parse_args()
 
     consumer = Consumer(
@@ -231,6 +252,7 @@ async def main():
         broker_host=args.broker_host,
         broker_port=args.broker_port,
         metrics_report_interval_seconds=args.metrics_report_interval_seconds,
+        interaction_mode=args.interaction_mode,
     )
     await consumer._connect()
     await consumer.declare_queue()

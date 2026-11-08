@@ -3,6 +3,7 @@ from src.docker_configurator.schema import ResourceLimits
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
 from src.scenario_service.dto.broker_config import BrokerConfig
+from src.scenario_service.dto.interaction_mode import InteractionMode
 
 
 class RabbitMQCreator(BaseBrokerCreator):
@@ -37,3 +38,8 @@ class RabbitMQCreator(BaseBrokerCreator):
             extra_labels={"scenario_id": scenario_id},
         )
         return container
+
+    def interaction_mode_args(self, mode: InteractionMode) -> tuple[str, ...]:
+        if mode not in (InteractionMode.WORK_QUEUE, InteractionMode.PUB_SUB):
+            raise ValueError(f"RabbitMQ does not support interaction mode {mode.value}")
+        return ("--interaction-mode", mode.value)

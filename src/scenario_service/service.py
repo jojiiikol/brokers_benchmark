@@ -112,6 +112,7 @@ class ScenarioService:
                 "--broker-port", "5672",
                 "--warmup-seconds", str(scenario.config.warmup_seconds),
                 "--duration-seconds", str(scenario.config.duration_seconds),
+                *self.broker_creator.interaction_mode_args(scenario.config.interaction_mode),
                 ],
             )
 
@@ -127,20 +128,22 @@ class ScenarioService:
                 docker_args=[*scenario.config.consumer_config.docker_args,
                 "--broker-host", f"rabbitmq-{scenario_id}",
                 "--broker-port", "5672",
+                *self.broker_creator.interaction_mode_args(scenario.config.interaction_mode),
                 ],
             )
 
-            consumer_container = await self.consumer_creator.configurate(
+            consumer_containers = await self.consumer_creator.configurate(
                 scenario_id=scenario_id,
                 config=consumer_config,
             )
-            scenario.containers.append(consumer_container)
-            scenario.container_ids_by_role["consumer"].append(consumer_container)
+            scenario.containers.extend(consumer_containers)
+            scenario.container_ids_by_role["consumer"].extend(consumer_containers)
 
             await network.connect({"Container": broker_container})
             for producer_container in producer_containers:
                 await network.connect({"Container": producer_container})
-            await network.connect({"Container": consumer_container})
+            for consumer_container in consumer_containers:
+                await network.connect({"Container": consumer_container})
 
             if not await self._validate_scenario(scenario):
                 raise ValueError("Component in scenario not built")

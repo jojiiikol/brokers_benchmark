@@ -3,6 +3,7 @@ from typing import Generic
 
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_creator import BaseCreator, ConfigT
+from src.scenario_service.dto.interaction_mode import InteractionMode
 
 
 class BaseBrokerCreator(BaseCreator[ConfigT], Generic[ConfigT]):
@@ -20,3 +21,6 @@ class BaseBrokerCreator(BaseCreator[ConfigT], Generic[ConfigT]):
             **kwargs
     ):
         pass
+
+    def interaction_mode_args(self, mode: InteractionMode) -> tuple[str, ...]:
+        raise NotImplementedError
