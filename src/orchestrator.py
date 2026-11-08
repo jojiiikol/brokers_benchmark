@@ -137,13 +137,13 @@ async def main():
         await orchestrator.create_scenario(
             scenario_config=ScenarioConfig(
                 broker_config=BrokerConfig(
-                    broker_type=Brokers.RABBITMQ
+                    broker_type=Brokers.KAFKA
                 ),
                 consumer_config=ConsumerConfig(
-                    count=5,
+                    count=1,
                     docker_args=[],
                     broker_connection=BrokerConnection(
-                        broker_type=Brokers.RABBITMQ,
+                        broker_type=Brokers.KAFKA,
                         username="",
                         password="",
                         host="",
@@ -152,13 +152,13 @@ async def main():
                 ),
                 producer_config=ProducerConfig(
                     load_type=LoadType.linear,
-                    payload_size=1024,
-                    rps=100,
+                    payload_size=512,
+                    rps=3,
                     guarantee_type=GuaranteeType.EXACTLY_ONCE,
                     count=1,
                     docker_args=[],
                     broker_connection=BrokerConnection(
-                        broker_type=Brokers.RABBITMQ,
+                        broker_type=Brokers.KAFKA,
                         username="",
                         password="",
                         host="",
@@ -166,7 +166,7 @@ async def main():
                     )
                 ),
                 warmup_seconds=30,
-                interaction_mode=InteractionMode.PUB_SUB,
+                interaction_mode=InteractionMode.WORK_QUEUE,
             )
         )
         await orchestrator.run()

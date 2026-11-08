@@ -18,6 +18,9 @@ from src.scenario_service.creator.base.abstract_service import BaseServiceCreato
 from src.scenario_service.creator.brokers.rabbitmq_creator import RabbitMQCreator
 from src.scenario_service.creator.consumer.consumer_creator import ConsumerCreator
 from src.scenario_service.creator.producer.producer_creator import ProducerCreator
+from src.scenario_service.creator.brokers.kafka_creator import KafkaCreator
+from src.scenario_service.creator.consumer.kafka_consumer_creator import KafkaConsumerCreator
+from src.scenario_service.creator.producer.kafka_producer_creator import KafkaProducerCreator
 from src.scenario_service.dto.broker_config import BrokerConfig, Brokers
 from src.scenario_service.dto.consumer_config import ConsumerConfig
 from src.scenario_service.dto.producer_config import ProducerConfig, LoadType, GuaranteeType
@@ -70,9 +73,41 @@ class ScenarioService:
     ):
         self.docker_service = docker_service or SdkDockerService()
         # self.configurator = ComponentConfigurator(docker_service)
-        self.producer_creator: BaseProducerCreator = ProducerCreator(self.docker_service)
-        self.consumer_creator: BaseConsumerCreator = ConsumerCreator(self.docker_service)
-        self.broker_creator: BaseBrokerCreator = RabbitMQCreator(self.docker_service)
+        self.producer_creators: dict[Brokers, BaseProducerCreator] = {
+            Brokers.RABBITMQ: ProducerCreator(self.docker_service),
+            Brokers.KAFKA: KafkaProducerCreator(self.docker_service),
+        }
+        self.consumer_creators: dict[Brokers, BaseConsumerCreator] = {
+            Brokers.RABBITMQ: ConsumerCreator(self.docker_service),
+            Brokers.KAFKA: KafkaConsumerCreator(self.docker_service),
+        }
+        self.broker_creators: dict[Brokers, BaseBrokerCreator] = {
+            Brokers.RABBITMQ: RabbitMQCreator(self.docker_service),
+            Brokers.KAFKA: KafkaCreator(self.docker_service),
+        }
+
+    def _get_creators(
+            self,
+            config: ScenarioConfig,
+    ) -> tuple[BaseBrokerCreator, BaseProducerCreator, BaseConsumerCreator]:
+        broker_type = config.broker_config.broker_type
+        component_brokers = {
+            config.producer_config.broker_connection.broker_type,
+            config.consumer_config.broker_connection.broker_type,
+        }
+        if component_brokers != {broker_type}:
+            raise ValueError(
+                "The broker type in producer and consumer connections must "
+                "match the scenario broker type"
+            )
+        try:
+            return (
+                self.broker_creators[broker_type],
+                self.producer_creators[broker_type],
+                self.consumer_creators[broker_type],
+            )
+        except KeyError as error:
+            raise ValueError(f"Broker {broker_type.value} is not implemented") from error
 
     def _component_count(
             self,
@@ -89,6 +124,9 @@ class ScenarioService:
         scenario_id = scenario.id
         scenario.status = ScenarioStatus.INITIALIZING
         try:
+            broker_creator, producer_creator, consumer_creator = self._get_creators(
+                scenario.config
+            )
 
             network = await self.docker_service.create_network(
                 name=f"network-{scenario_id}",
@@ -98,7 +136,7 @@ class ScenarioService:
                 },
             )
 
-            broker_container = await self.broker_creator.configurate(
+            broker_container = await broker_creator.configurate(
                 scenario_id=scenario_id,
                 config=scenario.config.broker_config,
             )
@@ -108,15 +146,15 @@ class ScenarioService:
             producer_config = dataclasses.replace(
                 scenario.config.producer_config,
                 docker_args=[*scenario.config.producer_config.docker_args,
-                "--broker-host", f"rabbitmq-{scenario_id}",
-                "--broker-port", "5672",
+                "--broker-host", f"{scenario.config.broker_config.broker_type.value}-{scenario_id}",
+                "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 "--warmup-seconds", str(scenario.config.warmup_seconds),
                 "--duration-seconds", str(scenario.config.duration_seconds),
-                *self.broker_creator.interaction_mode_args(scenario.config.interaction_mode),
+                *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
                 ],
             )
 
-            producer_containers = await self.producer_creator.configurate(
+            producer_containers = await producer_creator.configurate(
                 scenario_id=scenario_id,
                 config=producer_config,
             )
@@ -126,15 +164,16 @@ class ScenarioService:
             consumer_config = dataclasses.replace(
                 scenario.config.consumer_config,
                 docker_args=[*scenario.config.consumer_config.docker_args,
-                "--broker-host", f"rabbitmq-{scenario_id}",
-                "--broker-port", "5672",
-                *self.broker_creator.interaction_mode_args(scenario.config.interaction_mode),
+                "--broker-host", f"{scenario.config.broker_config.broker_type.value}-{scenario_id}",
+                "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
+                *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
                 ],
             )
 
-            consumer_containers = await self.consumer_creator.configurate(
+            consumer_containers = await consumer_creator.configurate(
                 scenario_id=scenario_id,
                 config=consumer_config,
+                interaction_mode=scenario.config.interaction_mode,
             )
             scenario.containers.extend(consumer_containers)
             scenario.container_ids_by_role["consumer"].extend(consumer_containers)
@@ -156,6 +195,14 @@ class ScenarioService:
             await self.docker_service.clear_scenario_resources(scenario.id)
 
         return scenario
+
+    @staticmethod
+    def _broker_port(broker_type: Brokers) -> int:
+        if broker_type is Brokers.RABBITMQ:
+            return 5672
+        if broker_type is Brokers.KAFKA:
+            return 9092
+        raise ValueError(f"Broker {broker_type.value} is not implemented")
 
     async def _validate_scenario(self, scenario: Scenario) -> bool:
         expected_counts = {
