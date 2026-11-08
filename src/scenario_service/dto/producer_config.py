@@ -19,8 +19,8 @@ class GuaranteeType(enum.Enum):
 @dataclasses.dataclass
 class ProducerConfig:
     load_type: LoadType
-    message_size: int
-    speed: int
+    payload_size: int
+    rps: int
     guarantee_type: GuaranteeType
     count: int
     docker_args: list[str]

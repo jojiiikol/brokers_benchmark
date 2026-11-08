@@ -11,4 +11,17 @@ class BaseProducerCreator(BaseServiceCreator):
             *args,
             **kwargs
     ):
+        docker_args = {
+            'rps', 'payload_size'
+        }
+
+        for field in config.__dict__:
+            if field in docker_args:
+                if getattr(config, field) is None:
+                    continue
+
+                config.docker_args.extend(
+                    [f"--{field}", str(getattr(config, field))]
+                )
+
         return await super().configurate(scenario_id, config, *args, **kwargs)

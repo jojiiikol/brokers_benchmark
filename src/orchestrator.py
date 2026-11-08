@@ -130,11 +130,11 @@ async def main():
                 ),
                 producer_config=ProducerConfig(
                     load_type=LoadType.linear,
-                    message_size=1024,
-                    speed=2,
+                    payload_size=1024,
+                    rps=5,
                     guarantee_type=GuaranteeType.EXACTLY_ONCE,
                     count=1,
-                    docker_args=["--rps", "5"],
+                    docker_args=[],
                     broker_connection=BrokerConnection(
                         broker_type=Brokers.RABBITMQ,
                         username="",

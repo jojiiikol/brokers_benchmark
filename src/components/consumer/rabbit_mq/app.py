@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import logging.config
+import time
 from typing import Any
 
 import aio_pika
@@ -88,6 +89,14 @@ class Consumer:
             durable=True,
         )
 
+    def latency(self, message: dict[str, Any], received_at: int) -> float | None:
+        sent_at: float | None  = message.get("sent_at", None)
+        if sent_at is None:
+            logger.warning(f"Received message not have sent_at field: {message}")
+            return None
+
+        return (received_at - sent_at) / 1_000_000
+
     async def consume(self) -> None:
         if self._channel is None or self._queue is None:
             raise RuntimeError("Consumer is not connected")
@@ -96,7 +105,12 @@ class Consumer:
         async with self._queue.iterator() as queue_iter:
             async for message in queue_iter:
                 async with message.process():
-                    logging.info(f"Message: {message.body}")
+                    received_at = time.monotonic_ns()
+                    decode_message = json.loads(message.body.decode("utf-8"))
+
+                    latency = self.latency(decode_message, received_at)
+
+                    logging.info(f"Message: {message.body[:100]} | Latency: {latency}")
 
                     if self._queue.name in message.body.decode():
                         break

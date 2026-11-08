@@ -185,7 +185,7 @@ class ScenarioService:
         try:
             container_ids = scenario.containers
             for container_id in container_ids:
-                if await self.docker_service.start_container(container_id):
+                if await self.docker_service.start_container(container_id): # Убрать последовательность. Брокер -> Компоненты
                     raise ValueError("Container not started")
 
             scenario.status = ScenarioStatus.RUNNING
@@ -210,8 +210,8 @@ async def main():
             ),
             producer_config=ProducerConfig(
                 load_type=LoadType.linear,
-                message_size=1024,
-                speed=2,
+                payload_size=1024,
+                rps=2,
                 guarantee_type=GuaranteeType.EXACTLY_ONCE,
                 count=1,
                 docker_args=["--rps", "5"]

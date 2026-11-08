@@ -3,6 +3,8 @@ import json
 import logging
 import logging.config
 import os
+import sys
+import time
 from typing import Any
 
 import aio_pika
@@ -44,7 +46,7 @@ logger = logging.getLogger(__name__)
 class Producer:
     CONNECTION_URL: str = ""
     TPS: int = 1
-    MESSAGE_SIZE: int = 64
+    MESSAGE_SIZE: int = 1024
 
 
     def __init__(
@@ -54,7 +56,9 @@ class Producer:
             broker_password: str = "guest",
             broker_host: str = "rabbit_mq",
             broker_port: str = "5672",
+
             tps: int = 1,
+            message_size: int = 1024
 
     ):
         self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
@@ -63,6 +67,8 @@ class Producer:
         self._channel = None
 
         self.TPS = tps
+        self.MESSAGE_SIZE = message_size
+
         self._interval = 1.0 / self.TPS
 
         self.queue_name = queue_name
@@ -97,6 +103,7 @@ class Producer:
         if self._channel is None:
             raise RuntimeError("Producer is not connected")
 
+        data["sent_at"] = time.monotonic_ns()
         message = aio_pika.Message(
             body=json.dumps(data).encode(),
             delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
@@ -126,9 +133,10 @@ class Producer:
             next_publish += self._interval
 
 
-    async def publish_forever(self, data: dict) -> None:
+    async def publish_forever(self) -> None:
         loop = asyncio.get_running_loop()
         next_publish = loop.time()
+
 
         while True:
             delay = next_publish - loop.time()
@@ -136,8 +144,20 @@ class Producer:
             if delay > 0:
                 await asyncio.sleep(delay)
 
+            data = self._create_payload()
             await self.publish(data)
+
             next_publish += self._interval
+
+    def _create_payload(self):
+        # empty message size - 72 bytes
+        factor = self.MESSAGE_SIZE * 1024 - 72
+        text = "a" * factor
+        payload = {
+            "data": text
+        }
+        return payload
+
 
 
     async def close(self) -> None:
@@ -171,7 +191,7 @@ async def main():
         "--rps", type=int, default=1, help="Request per second for message sending"
     )
     parser.add_argument(
-        "--payload-size", type=int, default=64, help="Payload size for message sending in Kbytes"
+        "--payload_size", type=int, default=1024, help="Payload size for message sending in Kbytes"
     )
     args = parser.parse_args()
 
@@ -179,14 +199,13 @@ async def main():
         queue_name="scenario",
         broker_host=args.broker_host,
         broker_port=args.broker_port,
+
+        message_size=args.payload_size,
         tps=int(args.rps),
     )
     await producer._connect()
     await producer.declare_queue()
-    await producer.publish_forever(
-        data={"text": "hello world"}
-    )
-
+    await producer.publish_forever()
 
 
 if __name__ == "__main__":

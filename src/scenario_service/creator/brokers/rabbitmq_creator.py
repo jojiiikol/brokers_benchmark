@@ -1,4 +1,5 @@
 from src.docker_configurator import ContainerConfig
+from src.docker_configurator.schema import ResourceLimits
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
 from src.scenario_service.dto.broker_config import BrokerConfig
@@ -28,6 +29,10 @@ class RabbitMQCreator(BaseBrokerCreator):
                 name=f"rabbitmq-{scenario_id}",
                 network_name=f"network-{scenario_id}",
                 labels={"component": "broker"},
+                resources=ResourceLimits(
+                    memory=1 * 1024 * 1024 * 1024,
+                    nano_cpus=1 * 1_000_000_000
+                )
             ),
             extra_labels={"scenario_id": scenario_id},
         )
