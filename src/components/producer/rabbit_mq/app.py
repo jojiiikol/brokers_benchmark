@@ -58,13 +58,17 @@ class Producer:
             broker_port: str = "5672",
 
             tps: int = 1,
-            message_size: int = 1024
+            message_size: int = 1024,
+            interaction_mode: str = "work_queue",
 
     ):
+        if interaction_mode not in ("work_queue", "pub_sub"):
+            raise ValueError(f"Unsupported interaction mode: {interaction_mode}")
         self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
 
         self._connection = None
         self._channel = None
+        self._exchange = None
 
         self.TPS = tps
         self.MESSAGE_SIZE = message_size
@@ -72,6 +76,7 @@ class Producer:
         self._interval = 1.0 / self.TPS
 
         self.queue_name = queue_name
+        self.interaction_mode = interaction_mode
 
 
     async def _connect(self):
@@ -90,14 +95,22 @@ class Producer:
             attempts -= 1
         raise Exception("Connection failed")
 
-    async def declare_queue(self) -> None:
+    async def declare_topology(self) -> None:
         if self._channel is None:
             raise RuntimeError("Producer is not connected")
 
-        await self._channel.declare_queue(
-            name=self.queue_name,
-            durable=True,
-        )
+        if self.interaction_mode == "pub_sub":
+            self._exchange = await self._channel.declare_exchange(
+                name=self.queue_name,
+                type=aio_pika.ExchangeType.FANOUT,
+                durable=True,
+            )
+        else:
+            await self._channel.declare_queue(
+                name=self.queue_name,
+                durable=True,
+            )
+            self._exchange = self._channel.default_exchange
 
     async def publish(
             self,
@@ -107,6 +120,8 @@ class Producer:
     ) -> None:
         if self._channel is None:
             raise RuntimeError("Producer is not connected")
+        if self._exchange is None:
+            raise RuntimeError("Producer topology is not declared")
 
         if data is None:
             body = self._create_payload(phase, time.monotonic_ns())
@@ -122,9 +137,9 @@ class Producer:
             content_type="application/json",
         )
 
-        await self._channel.default_exchange.publish(
+        await self._exchange.publish(
             message,
-            routing_key=self.queue_name,
+            routing_key="" if self.interaction_mode == "pub_sub" else self.queue_name,
         )
         logger.info("Message published")
 
@@ -236,6 +251,10 @@ async def main():
         "--duration-seconds", type=float, required=True,
         help="Duration of the measured message-flow phase",
     )
+    parser.add_argument(
+        "--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue",
+        help="RabbitMQ delivery topology",
+    )
     args = parser.parse_args()
     if args.rps <= 0:
         parser.error("--rps must be greater than zero")
@@ -253,9 +272,10 @@ async def main():
 
         message_size=args.payload_size,
         tps=int(args.rps),
+        interaction_mode=args.interaction_mode,
     )
     await producer._connect()
-    await producer.declare_queue()
+    await producer.declare_topology()
     await producer.run_benchmark(
         warmup_seconds=args.warmup_seconds,
         duration_seconds=args.duration_seconds,

@@ -5,6 +5,7 @@ from src import setup_logging
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.dto.broker_config import BrokerConfig, Brokers, BrokerConnection
 from src.scenario_service.dto.consumer_config import ConsumerConfig
+from src.scenario_service.dto.interaction_mode import InteractionMode
 from src.scenario_service.dto.producer_config import ProducerConfig, GuaranteeType, LoadType
 from src.scenario_service.service import ScenarioService, ScenarioConfig, Scenario, ScenarioStatus
 
@@ -139,7 +140,7 @@ async def main():
                     broker_type=Brokers.RABBITMQ
                 ),
                 consumer_config=ConsumerConfig(
-                    count=1,
+                    count=5,
                     docker_args=[],
                     broker_connection=BrokerConnection(
                         broker_type=Brokers.RABBITMQ,
@@ -154,7 +155,7 @@ async def main():
                     payload_size=1024,
                     rps=100,
                     guarantee_type=GuaranteeType.EXACTLY_ONCE,
-                    count=5,
+                    count=1,
                     docker_args=[],
                     broker_connection=BrokerConnection(
                         broker_type=Brokers.RABBITMQ,
@@ -165,6 +166,7 @@ async def main():
                     )
                 ),
                 warmup_seconds=30,
+                interaction_mode=InteractionMode.PUB_SUB,
             )
         )
         await orchestrator.run()

@@ -4,6 +4,7 @@ import enum
 from src.scenario_service.dto.broker_config import BrokerConfig
 from src.scenario_service.dto.consumer_config import ConsumerConfig
 from src.scenario_service.dto.producer_config import ProducerConfig
+from src.scenario_service.dto.interaction_mode import InteractionMode
 
 
 @dataclasses.dataclass
@@ -11,6 +12,7 @@ class ScenarioConfig:
     broker_config: BrokerConfig
     consumer_config: ConsumerConfig
     producer_config: ProducerConfig
+    interaction_mode: InteractionMode = InteractionMode.WORK_QUEUE
     warmup_seconds: float = 0
     duration_seconds: float = 60
 

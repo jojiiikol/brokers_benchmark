@@ -15,8 +15,15 @@ class BaseConsumerCreator(BaseServiceCreator):
             self,
             scenario_id: str,
             config: ConsumerConfig,
+            instance_index: int | None = None,
             *args,
             **kwargs
     ):
-        return await super().configurate(scenario_id, config, *args, **kwargs)
+        return await super().configurate(
+            scenario_id,
+            config,
+            instance_index=instance_index,
+            *args,
+            **kwargs,
+        )
 
