@@ -5,7 +5,6 @@ from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
 from src.scenario_service.dto.broker_config import BrokerConfig
 from src.scenario_service.dto.interaction_mode import InteractionMode
 
-
 class RabbitMQCreator(BaseBrokerCreator):
     def __init__(
             self,
@@ -23,7 +22,6 @@ class RabbitMQCreator(BaseBrokerCreator):
         image = await self.docker_service.get_image(
             tag="rabbitmq"
         )
-
         container = await self.docker_service.create_container(
             container_config=ContainerConfig(
                 image=image,

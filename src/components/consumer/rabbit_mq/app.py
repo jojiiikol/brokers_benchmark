@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import logging.config
 import time
 from typing import Any
 
@@ -10,37 +9,9 @@ from aiormq import AMQPConnectionError
 from dotenv import load_dotenv
 import argparse
 import math
+from src.logger.config import setup_logging
 load_dotenv()
-
-LOGGING_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "standard": {
-            "format": (
-                "%(asctime)s | %(levelname)s | "
-                "%(name)s:%(lineno)d | %(message)s"
-            ),
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "level": "DEBUG",
-            "formatter": "standard",
-            "stream": "ext://sys.stdout",
-        },
-    },
-    "root": {
-        "level": "INFO",
-        "handlers": ["console"],
-    },
-}
-
-logging.config.dictConfig(LOGGING_CONFIG)
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("benchmark.consumer.rabbitmq")
 
 
 class LatencyMetrics:
@@ -119,9 +90,10 @@ class Consumer:
             try:
                 self._connection = await aio_pika.connect_robust(self.CONNECTION_URL)
                 self._channel = await self._connection.channel()
+                logger.info("Connected to RabbitMQ at %s", self.CONNECTION_URL)
                 return
             except AMQPConnectionError:
-                logging.warning("No connection, retrying...")
+                logger.warning("RabbitMQ is not ready, retrying in 5 seconds")
                 await asyncio.sleep(5)
             attempts -= 1
         raise Exception("Connection failed")
@@ -142,11 +114,13 @@ class Consumer:
                 auto_delete=True,
             )
             await self._queue.bind(exchange)
+            logger.info("Bound exclusive RabbitMQ subscriber queue to %s", self.queue_name)
         else:
             self._queue = await self._channel.declare_queue(
                 name=self.queue_name,
                 durable=True,
             )
+            logger.info("Declared RabbitMQ work queue %s", self.queue_name)
 
     def latency(self, message: dict[str, Any], received_at: int) -> float | None:
         sent_at: float | None  = message.get("sent_at", None)
@@ -163,6 +137,7 @@ class Consumer:
 
         loop = asyncio.get_running_loop()
         self._last_metrics_report_at = loop.time()
+        logger.info("Started RabbitMQ consumption: mode=%s", self.interaction_mode)
         try:
             async with self._queue.iterator() as queue_iter:
                 async for message in queue_iter:
@@ -215,6 +190,7 @@ class Consumer:
             self._connection = None
             self._channel = None
             self._queue = None
+            logger.info("Closed RabbitMQ consumer connection")
 
     async def __aenter__(self) -> "Producer":
         await self._connect()
@@ -230,6 +206,7 @@ class Consumer:
 
 
 async def main():
+    setup_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--broker-host", type=str, required=True, help="RabbitMQ broker host"

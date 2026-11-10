@@ -2,36 +2,16 @@ import argparse
 import asyncio
 import json
 import logging
-import logging.config
 import time
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
+from src.logger.config import setup_logging
 
 
 TOPIC_NAME = "scenario"
 
-LOGGING_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "standard": {
-            "format": "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d | %(message)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "level": "DEBUG",
-            "formatter": "standard",
-            "stream": "ext://sys.stdout",
-        },
-    },
-    "root": {"level": "INFO", "handlers": ["console"]},
-}
-logging.config.dictConfig(LOGGING_CONFIG)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("benchmark.producer.kafka")
 
 
 class KafkaProducer:
@@ -68,6 +48,7 @@ class KafkaProducer:
             try:
                 await producer.start()
                 self._producer = producer
+                logger.info("Connected to Kafka at %s", self.bootstrap_servers)
                 return
             except KafkaConnectionError:
                 await producer.stop()
@@ -83,6 +64,10 @@ class KafkaProducer:
         await self._producer.send_and_wait(TOPIC_NAME, body)
 
     async def publish_for(self, duration_seconds: float, phase: str) -> None:
+        logger.info(
+            "Starting Kafka %s phase: duration_seconds=%s rps=%s",
+            phase, duration_seconds, self.rps,
+        )
         loop = asyncio.get_running_loop()
         next_publish = loop.time()
         deadline = next_publish + duration_seconds
@@ -93,6 +78,7 @@ class KafkaProducer:
                 await asyncio.sleep(delay)
             await self.publish(phase)
             next_publish += 1 / self.rps
+        logger.info("Finished Kafka %s phase", phase)
 
     async def run_benchmark(
             self,
@@ -123,9 +109,11 @@ class KafkaProducer:
         if self._producer is not None:
             await self._producer.stop()
             self._producer = None
+            logger.info("Closed Kafka producer connection")
 
 
 async def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--broker-host", required=True, help="Kafka broker host")
     parser.add_argument("--broker-port", default="9092", help="Kafka broker port")

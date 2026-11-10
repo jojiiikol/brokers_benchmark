@@ -35,7 +35,7 @@ from src.scenario_service.dto.consumer_config import ConsumerConfig
 from src.scenario_service.dto.producer_config import ProducerConfig, LoadType, GuaranteeType
 from src.scenario_service.dto.scenario_config import ScenarioConfig
 
-logger = logging.getLogger("my_app")
+logger = logging.getLogger(__name__)
 
 
 COMPONENTS_PATH = pathlib.Path(__file__).resolve().parent.parent / "components"
@@ -150,6 +150,11 @@ class ScenarioService:
                 },
             )
 
+            logger.info(
+                "Creating broker: type=%s scenario_id=%s",
+                scenario.config.broker_config.broker_type.value,
+                scenario_id,
+            )
             broker_container = await broker_creator.configurate(
                 scenario_id=scenario_id,
                 config=scenario.config.broker_config,

@@ -24,9 +24,12 @@ class SdkDockerService:
 
     async def open_client(self):
         self.client = aiodocker.Docker()
+        logger.info("Docker client opened")
 
     async def close_client(self):
         await self.client.close()
+        self.client = None
+        logger.info("Docker client closed")
 
     async def create_network(
             self,
@@ -72,8 +75,8 @@ class SdkDockerService:
 
             logger.info(f"Created container: {name}")
             return container.id
-        except Exception as e:
-            logger.error(e)
+        except Exception:
+            logger.exception("Failed to create container %s", container_config.name)
             return None
 
     async def start_container(
@@ -111,8 +114,8 @@ class SdkDockerService:
             container = await self.client.containers.get(
                 container_id
             )
-        except Exception as e:
-            logger.warning("Container not found!")
+        except Exception:
+            logger.warning("Container %s not found", container_id)
             return None
 
         return container

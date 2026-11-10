@@ -1,9 +1,7 @@
 import asyncio
 import json
 import logging
-import logging.config
 import os
-import sys
 import time
 from typing import Any
 
@@ -11,37 +9,9 @@ import aio_pika
 from aiormq import AMQPConnectionError
 from dotenv import load_dotenv
 import argparse
+from src.logger.config import setup_logging
 load_dotenv()
-
-LOGGING_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "standard": {
-            "format": (
-                "%(asctime)s | %(levelname)s | "
-                "%(name)s:%(lineno)d | %(message)s"
-            ),
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "level": "DEBUG",
-            "formatter": "standard",
-            "stream": "ext://sys.stdout",
-        },
-    },
-    "root": {
-        "level": "INFO",
-        "handlers": ["console"],
-    },
-}
-
-logging.config.dictConfig(LOGGING_CONFIG)
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("benchmark.producer.rabbitmq")
 
 class Producer:
     CONNECTION_URL: str = ""
@@ -88,9 +58,10 @@ class Producer:
             try:
                 self._connection = await aio_pika.connect_robust(self.CONNECTION_URL)
                 self._channel = await self._connection.channel()
+                logger.info("Connected to RabbitMQ at %s", self.CONNECTION_URL)
                 return
             except AMQPConnectionError:
-                logging.warning("No connection, retrying...")
+                logger.warning("RabbitMQ is not ready, retrying in 5 seconds")
                 await asyncio.sleep(5)
             attempts -= 1
         raise Exception("Connection failed")
@@ -105,12 +76,14 @@ class Producer:
                 type=aio_pika.ExchangeType.FANOUT,
                 durable=True,
             )
+            logger.info("Declared RabbitMQ fanout exchange %s", self.queue_name)
         else:
             await self._channel.declare_queue(
                 name=self.queue_name,
                 durable=True,
             )
             self._exchange = self._channel.default_exchange
+            logger.info("Declared RabbitMQ work queue %s", self.queue_name)
 
     async def publish(
             self,
@@ -141,7 +114,7 @@ class Producer:
             message,
             routing_key="" if self.interaction_mode == "pub_sub" else self.queue_name,
         )
-        logger.info("Message published")
+        logger.debug("Published RabbitMQ message for phase=%s", phase)
 
     async def publish_many(
             self,
@@ -162,6 +135,10 @@ class Producer:
 
     async def publish_for(self, duration_seconds: float, phase: str) -> None:
         """Publish at the configured rate for one benchmark phase."""
+        logger.info(
+            "Starting RabbitMQ %s phase: duration_seconds=%s rps=%s",
+            phase, duration_seconds, self.TPS,
+        )
         loop = asyncio.get_running_loop()
         next_publish = loop.time()
         deadline = next_publish + duration_seconds
@@ -175,6 +152,7 @@ class Producer:
             await self.publish(phase=phase)
 
             next_publish += self._interval
+        logger.info("Finished RabbitMQ %s phase", phase)
 
     async def run_benchmark(
             self,
@@ -215,6 +193,7 @@ class Producer:
             await self._connection.close()
             self._connection = None
             self._channel = None
+            logger.info("Closed RabbitMQ producer connection")
 
     async def __aenter__(self) -> "Producer":
         await self._connect()
@@ -230,6 +209,7 @@ class Producer:
 
 
 async def main():
+    setup_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--broker-host", type=str, required=True, help="RabbitMQ broker host"

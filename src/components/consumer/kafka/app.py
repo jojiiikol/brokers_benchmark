@@ -2,38 +2,18 @@ import argparse
 import asyncio
 import json
 import logging
-import logging.config
 import math
 import time
 from typing import Any
 
 from aiokafka import AIOKafkaConsumer
 from aiokafka.errors import KafkaConnectionError
+from src.logger.config import setup_logging
 
 
 TOPIC_NAME = "scenario"
 
-LOGGING_CONFIG = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "standard": {
-            "format": "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d | %(message)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "level": "DEBUG",
-            "formatter": "standard",
-            "stream": "ext://sys.stdout",
-        },
-    },
-    "root": {"level": "INFO", "handlers": ["console"]},
-}
-logging.config.dictConfig(LOGGING_CONFIG)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("benchmark.consumer.kafka")
 
 
 class LatencyMetrics:
@@ -94,6 +74,10 @@ class KafkaConsumer:
             try:
                 await consumer.start()
                 self._consumer = consumer
+                logger.info(
+                    "Connected to Kafka at %s with group_id=%s",
+                    self.bootstrap_servers, self.group_id,
+                )
                 return
             except KafkaConnectionError:
                 await consumer.stop()
@@ -108,6 +92,7 @@ class KafkaConsumer:
 
         loop = asyncio.get_running_loop()
         self._last_metrics_report_at = loop.time()
+        logger.info("Started Kafka consumption: group_id=%s", self.group_id)
         try:
             async for message in self._consumer:
                 received_at = time.monotonic_ns()
@@ -161,9 +146,11 @@ class KafkaConsumer:
         if self._consumer is not None:
             await self._consumer.stop()
             self._consumer = None
+            logger.info("Closed Kafka consumer connection")
 
 
 async def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser()
     parser.add_argument("--broker-host", required=True, help="Kafka broker host")
     parser.add_argument("--broker-port", default="9092", help="Kafka broker port")

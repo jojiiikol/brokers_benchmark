@@ -5,7 +5,6 @@ from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
 from src.scenario_service.dto.broker_config import BrokerConfig
 from src.scenario_service.dto.interaction_mode import InteractionMode
 
-
 class NatsJetStreamCreator(BaseBrokerCreator):
     """Create one NATS server with JetStream enabled for a scenario."""
 

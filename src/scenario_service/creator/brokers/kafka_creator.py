@@ -5,7 +5,6 @@ from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
 from src.scenario_service.dto.broker_config import BrokerConfig
 from src.scenario_service.dto.interaction_mode import InteractionMode
 
-
 class KafkaCreator(BaseBrokerCreator):
     """Create one isolated, single-node Kafka broker for a scenario."""
 
@@ -20,7 +19,6 @@ class KafkaCreator(BaseBrokerCreator):
     ) -> str | None:
         broker_name = f"kafka-{scenario_id}"
         image = await self.docker_service.get_image(tag="apache/kafka:4.4.0")
-
         return await self.docker_service.create_container(
             container_config=ContainerConfig(
                 image=image,

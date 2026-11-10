@@ -40,9 +40,9 @@ class BaseServiceCreator(BaseCreator):
         image_tag = self._image_tags.get(image_key)
         if image_tag is None:
             image_tag = await self.docker_service.get_image(
-                path=self.COMPONENTS_PATH / component_type / broker_type,
+                path=self.SOURCE_PATH,
                 tag=f"{component_type}-{broker_type}",
-                path_dockerfile="Dockerfile",
+                path_dockerfile=f"components/{component_type}/{broker_type}/Dockerfile",
                 labels={"component": component_type},
             )
             self._image_tags[image_key] = image_tag
