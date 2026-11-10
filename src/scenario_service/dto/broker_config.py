@@ -6,7 +6,8 @@ import enum
 class Brokers(enum.Enum):
     RABBITMQ = "rabbit_mq"
     KAFKA = "kafka"
-    NATS = "nats"
+    NATS_PULL = "nats_pull"
+    NATS_PUSH = "nats_push"
 
 @dataclasses.dataclass
 class BrokerConnection:

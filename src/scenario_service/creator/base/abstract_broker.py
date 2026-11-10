@@ -24,3 +24,6 @@ class BaseBrokerCreator(BaseCreator[ConfigT], Generic[ConfigT]):
 
     def interaction_mode_args(self, mode: InteractionMode) -> tuple[str, ...]:
         raise NotImplementedError
+
+    def consumer_mode_args(self) -> tuple[str, ...]:
+        return ()

@@ -21,6 +21,15 @@ from src.scenario_service.creator.producer.producer_creator import ProducerCreat
 from src.scenario_service.creator.brokers.kafka_creator import KafkaCreator
 from src.scenario_service.creator.consumer.kafka_consumer_creator import KafkaConsumerCreator
 from src.scenario_service.creator.producer.kafka_producer_creator import KafkaProducerCreator
+from src.scenario_service.creator.brokers.nats_creator import NatsPullCreator, NatsPushCreator
+from src.scenario_service.creator.consumer.nats_consumer_creator import (
+    NatsPullConsumerCreator,
+    NatsPushConsumerCreator,
+)
+from src.scenario_service.creator.producer.nats_producer_creator import (
+    NatsPullProducerCreator,
+    NatsPushProducerCreator,
+)
 from src.scenario_service.dto.broker_config import BrokerConfig, Brokers
 from src.scenario_service.dto.consumer_config import ConsumerConfig
 from src.scenario_service.dto.producer_config import ProducerConfig, LoadType, GuaranteeType
@@ -76,14 +85,20 @@ class ScenarioService:
         self.producer_creators: dict[Brokers, BaseProducerCreator] = {
             Brokers.RABBITMQ: ProducerCreator(self.docker_service),
             Brokers.KAFKA: KafkaProducerCreator(self.docker_service),
+            Brokers.NATS_PULL: NatsPullProducerCreator(self.docker_service),
+            Brokers.NATS_PUSH: NatsPushProducerCreator(self.docker_service),
         }
         self.consumer_creators: dict[Brokers, BaseConsumerCreator] = {
             Brokers.RABBITMQ: ConsumerCreator(self.docker_service),
             Brokers.KAFKA: KafkaConsumerCreator(self.docker_service),
+            Brokers.NATS_PULL: NatsPullConsumerCreator(self.docker_service),
+            Brokers.NATS_PUSH: NatsPushConsumerCreator(self.docker_service),
         }
         self.broker_creators: dict[Brokers, BaseBrokerCreator] = {
             Brokers.RABBITMQ: RabbitMQCreator(self.docker_service),
             Brokers.KAFKA: KafkaCreator(self.docker_service),
+            Brokers.NATS_PULL: NatsPullCreator(self.docker_service),
+            Brokers.NATS_PUSH: NatsPushCreator(self.docker_service),
         }
 
     def _get_creators(
@@ -127,7 +142,6 @@ class ScenarioService:
             broker_creator, producer_creator, consumer_creator = self._get_creators(
                 scenario.config
             )
-
             network = await self.docker_service.create_network(
                 name=f"network-{scenario_id}",
                 labels={
@@ -202,6 +216,8 @@ class ScenarioService:
             return 5672
         if broker_type is Brokers.KAFKA:
             return 9092
+        if broker_type in (Brokers.NATS_PULL, Brokers.NATS_PUSH):
+            return 4222
         raise ValueError(f"Broker {broker_type.value} is not implemented")
 
     async def _validate_scenario(self, scenario: Scenario) -> bool:

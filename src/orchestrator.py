@@ -137,13 +137,13 @@ async def main():
         await orchestrator.create_scenario(
             scenario_config=ScenarioConfig(
                 broker_config=BrokerConfig(
-                    broker_type=Brokers.KAFKA
+                    broker_type=Brokers.NATS_PULL
                 ),
                 consumer_config=ConsumerConfig(
                     count=1,
                     docker_args=[],
                     broker_connection=BrokerConnection(
-                        broker_type=Brokers.KAFKA,
+                        broker_type=Brokers.NATS_PULL,
                         username="",
                         password="",
                         host="",
@@ -153,19 +153,19 @@ async def main():
                 producer_config=ProducerConfig(
                     load_type=LoadType.linear,
                     payload_size=512,
-                    rps=3,
+                    rps=1000,
                     guarantee_type=GuaranteeType.EXACTLY_ONCE,
                     count=1,
                     docker_args=[],
                     broker_connection=BrokerConnection(
-                        broker_type=Brokers.KAFKA,
+                        broker_type=Brokers.NATS_PULL,
                         username="",
                         password="",
                         host="",
                         port=0,
                     )
                 ),
-                warmup_seconds=30,
+                warmup_seconds=5,
                 interaction_mode=InteractionMode.WORK_QUEUE,
             )
         )

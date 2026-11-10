@@ -35,7 +35,7 @@ class BaseServiceCreator(BaseCreator):
         if component_type is None:
             raise ValueError("Config type not supported")
 
-        broker_type = config.broker_connection.broker_type.value
+        broker_type = self.component_broker_type(config)
         image_key = (component_type, broker_type)
         image_tag = self._image_tags.get(image_key)
         if image_tag is None:
@@ -59,3 +59,6 @@ class BaseServiceCreator(BaseCreator):
             extra_labels={"scenario_id": scenario_id},
         )
         return container
+
+    def component_broker_type(self, config: ConfigT) -> str:
+        return config.broker_connection.broker_type.value
