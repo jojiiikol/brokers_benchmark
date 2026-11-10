@@ -17,7 +17,7 @@ class KafkaCreator(BaseBrokerCreator):
             *args,
             **kwargs,
     ) -> str | None:
-        broker_name = f"kafka-{scenario_id}"
+        broker_name = self.broker_hostname(scenario_id)
         image = await self.docker_service.get_image(tag="apache/kafka:4.4.0")
         return await self.docker_service.create_container(
             container_config=ContainerConfig(
@@ -49,6 +49,9 @@ class KafkaCreator(BaseBrokerCreator):
             ),
             extra_labels={"scenario_id": scenario_id},
         )
+
+    def broker_hostname(self, scenario_id: str) -> str:
+        return f"kafka-{scenario_id}"
 
     def interaction_mode_args(self, mode: InteractionMode) -> tuple[str, ...]:
         if mode not in (InteractionMode.WORK_QUEUE, InteractionMode.PUB_SUB):

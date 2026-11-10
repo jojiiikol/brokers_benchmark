@@ -20,12 +20,14 @@ async def main() -> None:
     try:
         await orchestrator.create_scenario(
             ScenarioConfig(
-                broker_config=BrokerConfig(broker_type=Brokers.NATS_PULL),
+                broker_config=BrokerConfig(
+                    broker_type=Brokers.RABBITMQ
+                ),
                 consumer_config=ConsumerConfig(
                     count=1,
                     docker_args=[],
                     broker_connection=BrokerConnection(
-                        broker_type=Brokers.NATS_PULL,
+                        broker_type=Brokers.RABBITMQ,
                         username="",
                         password="",
                         host="",
@@ -33,14 +35,16 @@ async def main() -> None:
                     ),
                 ),
                 producer_config=ProducerConfig(
-                    load_type=LoadType.linear,
-                    payload_size=512,
-                    rps=1000,
+                    load_type=LoadType.LINEAR,
+                    payload_size=128,
+                    rps=100,
+                    end_rps=1000000,
+                    step_duration_seconds=10,
                     guarantee_type=GuaranteeType.EXACTLY_ONCE,
                     count=1,
                     docker_args=[],
                     broker_connection=BrokerConnection(
-                        broker_type=Brokers.NATS_PULL,
+                        broker_type=Brokers.RABBITMQ,
                         username="",
                         password="",
                         host="",
@@ -48,6 +52,7 @@ async def main() -> None:
                     ),
                 ),
                 warmup_seconds=5,
+                duration_seconds=120,
                 interaction_mode=InteractionMode.WORK_QUEUE,
             )
         )

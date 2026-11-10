@@ -56,6 +56,7 @@ class KafkaConsumer:
         self.group_id = group_id
         self.metrics_report_interval_seconds = metrics_report_interval_seconds
         self.metrics = LatencyMetrics()
+        self.metrics_by_load_step: dict[tuple[int, int], LatencyMetrics] = {}
         self._consumer: AIOKafkaConsumer | None = None
         self._last_metrics_report_at: float | None = None
 
@@ -101,6 +102,7 @@ class KafkaConsumer:
                 latency = self.latency(decoded_message, received_at)
                 if phase == "measurement" and latency is not None:
                     self.metrics.observe(latency)
+                    self._metrics_for_load_step(decoded_message).observe(latency)
                     self._report_metrics_if_due(loop.time())
                 logger.debug(
                     "Phase=%s partition=%s offset=%s latency_ms=%s",
@@ -127,6 +129,11 @@ class KafkaConsumer:
             self._log_metrics(final=False)
             self._last_metrics_report_at = now
 
+    def _metrics_for_load_step(self, message: dict[str, Any]) -> LatencyMetrics:
+        step = int(message.get("load_step", 0))
+        target_rps = int(message.get("target_rps", 0))
+        return self.metrics_by_load_step.setdefault((step, target_rps), LatencyMetrics())
+
     def _log_metrics(self, *, final: bool) -> None:
         summary = self.metrics.summary()
         if not summary["count"]:
@@ -141,6 +148,20 @@ class KafkaConsumer:
             summary["p95_ms"],
             summary["p99_ms"],
         )
+        for (step, target_rps), step_metrics in sorted(self.metrics_by_load_step.items()):
+            step_summary = step_metrics.summary()
+            logger.info(
+                "%s | load_step=%s | target_rps=%s | samples=%s | "
+                "p50_ms=%.3f | p75_ms=%.3f | p95_ms=%.3f | p99_ms=%.3f",
+                prefix,
+                step,
+                target_rps,
+                step_summary["count"],
+                step_summary["p50_ms"],
+                step_summary["p75_ms"],
+                step_summary["p95_ms"],
+                step_summary["p99_ms"],
+            )
 
     async def close(self) -> None:
         if self._consumer is not None:

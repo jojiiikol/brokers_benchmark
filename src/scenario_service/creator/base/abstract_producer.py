@@ -2,7 +2,7 @@
 import dataclasses
 
 from src.scenario_service.creator.base.abstract_service import BaseServiceCreator
-from src.scenario_service.dto.producer_config import ProducerConfig
+from src.scenario_service.dto.producer_config import LoadType, ProducerConfig
 
 
 class BaseProducerCreator(BaseServiceCreator):
@@ -14,11 +14,23 @@ class BaseProducerCreator(BaseServiceCreator):
             *args,
             **kwargs
     ):
-        docker_args = [
-            *config.docker_args,
-            "--rps", str(config.rps),
-            "--payload_size", str(config.payload_size),
-        ]
+        docker_args = [*config.docker_args, "--load-type", config.load_type.value]
+        if config.load_type is LoadType.CONSTANT:
+            docker_args.extend(("--rps", str(config.rps)))
+        elif config.load_type is LoadType.LINEAR:
+            docker_args.extend(
+                (
+                    "--start-rps",
+                    str(config.rps),
+                    "--end-rps",
+                    str(config.end_rps),
+                    "--step-duration-seconds",
+                    str(config.step_duration_seconds),
+                )
+            )
+        else:
+            raise ValueError(f"Unsupported load type {config.load_type.value}")
+        docker_args.extend(("--payload_size", str(config.payload_size)))
         container_config = dataclasses.replace(config, docker_args=docker_args)
         return await super().configurate(
             scenario_id,

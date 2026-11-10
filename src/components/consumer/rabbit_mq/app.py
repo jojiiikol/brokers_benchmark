@@ -77,6 +77,7 @@ class Consumer:
         self.queue_name = queue_name
         self.interaction_mode = interaction_mode
         self.metrics = LatencyMetrics()
+        self.metrics_by_load_step: dict[tuple[int, int], LatencyMetrics] = {}
         self.metrics_report_interval_seconds = metrics_report_interval_seconds
         self._last_metrics_report_at: float | None = None
 
@@ -149,6 +150,7 @@ class Consumer:
                         phase = decode_message.get("phase", "unknown")
                         if phase == "measurement" and latency is not None:
                             self.metrics.observe(latency)
+                            self._metrics_for_load_step(decode_message).observe(latency)
                             self._report_metrics_if_due(loop.time())
 
                         logger.debug(
@@ -167,6 +169,11 @@ class Consumer:
             self._log_metrics(final=False)
             self._last_metrics_report_at = now
 
+    def _metrics_for_load_step(self, message: dict[str, Any]) -> LatencyMetrics:
+        step = int(message.get("load_step", 0))
+        target_rps = int(message.get("target_rps", 0))
+        return self.metrics_by_load_step.setdefault((step, target_rps), LatencyMetrics())
+
     def _log_metrics(self, *, final: bool) -> None:
         summary = self.metrics.summary()
         if not summary["count"]:
@@ -182,6 +189,20 @@ class Consumer:
             summary["p95_ms"],
             summary["p99_ms"],
         )
+        for (step, target_rps), step_metrics in sorted(self.metrics_by_load_step.items()):
+            step_summary = step_metrics.summary()
+            logger.info(
+                "%s | load_step=%s | target_rps=%s | samples=%s | "
+                "p50_ms=%.3f | p75_ms=%.3f | p95_ms=%.3f | p99_ms=%.3f",
+                prefix,
+                step,
+                target_rps,
+                step_summary["count"],
+                step_summary["p50_ms"],
+                step_summary["p75_ms"],
+                step_summary["p95_ms"],
+                step_summary["p99_ms"],
+            )
 
 
     async def close(self) -> None:

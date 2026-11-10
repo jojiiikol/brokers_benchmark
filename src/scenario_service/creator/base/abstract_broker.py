@@ -22,6 +22,11 @@ class BaseBrokerCreator(BaseCreator[ConfigT], Generic[ConfigT]):
     ):
         pass
 
+    @abc.abstractmethod
+    def broker_hostname(self, scenario_id: str) -> str:
+        """Return the Docker DNS name used by scenario components."""
+        raise NotImplementedError
+
     def interaction_mode_args(self, mode: InteractionMode) -> tuple[str, ...]:
         raise NotImplementedError
 

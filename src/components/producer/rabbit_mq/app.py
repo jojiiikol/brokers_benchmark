@@ -9,6 +9,14 @@ import aio_pika
 from aiormq import AMQPConnectionError
 from dotenv import load_dotenv
 import argparse
+from src.components.common.load_profile import (
+    LoadScheduler,
+    LoadStep,
+    LoadType,
+    add_load_profile_arguments,
+    publish_with_profile,
+    scheduler_from_arguments,
+)
 from src.logger.config import setup_logging
 load_dotenv()
 logger = logging.getLogger("benchmark.producer.rabbitmq")
@@ -30,6 +38,7 @@ class Producer:
             tps: int = 1,
             message_size: int = 1024,
             interaction_mode: str = "work_queue",
+            load_scheduler: LoadScheduler | None = None,
 
     ):
         if interaction_mode not in ("work_queue", "pub_sub"):
@@ -40,7 +49,12 @@ class Producer:
         self._channel = None
         self._exchange = None
 
-        self.TPS = tps
+        self.load_scheduler = load_scheduler or LoadScheduler(
+            load_type=LoadType.CONSTANT,
+            measurement_duration_seconds=1,
+            rps=tps,
+        )
+        self.TPS = self.load_scheduler.step_at(0).target_rps
         self.MESSAGE_SIZE = message_size
 
         self._interval = 1.0 / self.TPS
@@ -90,6 +104,7 @@ class Producer:
             data: dict[str, Any] | None = None,
             *,
             phase: str = "measurement",
+            load_step: LoadStep | None = None,
     ) -> None:
         if self._channel is None:
             raise RuntimeError("Producer is not connected")
@@ -97,7 +112,11 @@ class Producer:
             raise RuntimeError("Producer topology is not declared")
 
         if data is None:
-            body = self._create_payload(phase, time.monotonic_ns())
+            body = self._create_payload(
+                phase,
+                time.monotonic_ns(),
+                load_step=load_step,
+            )
         else:
             # Compatibility path for callers that provide their own payload.
             # The benchmark path above is the only one with an exact body size.
@@ -136,22 +155,22 @@ class Producer:
     async def publish_for(self, duration_seconds: float, phase: str) -> None:
         """Publish at the configured rate for one benchmark phase."""
         logger.info(
-            "Starting RabbitMQ %s phase: duration_seconds=%s rps=%s",
-            phase, duration_seconds, self.TPS,
+            "Starting RabbitMQ %s phase: duration_seconds=%s load_type=%s",
+            phase,
+            duration_seconds,
+            self.load_scheduler.load_type.value,
         )
-        loop = asyncio.get_running_loop()
-        next_publish = loop.time()
-        deadline = next_publish + duration_seconds
-
-        while next_publish < deadline:
-            delay = next_publish - loop.time()
-
-            if delay > 0:
-                await asyncio.sleep(delay)
-
-            await self.publish(phase=phase)
-
-            next_publish += self._interval
+        await publish_with_profile(
+            scheduler=self.load_scheduler,
+            duration_seconds=duration_seconds,
+            publish=lambda step: self.publish(phase=phase, load_step=step),
+            on_step=lambda step: logger.info(
+                "RabbitMQ %s load step=%s target_rps=%s",
+                phase,
+                step.index,
+                step.target_rps,
+            ),
+        )
         logger.info("Finished RabbitMQ %s phase", phase)
 
     async def run_benchmark(
@@ -162,13 +181,20 @@ class Producer:
         await self.publish_for(warmup_seconds, phase="warmup")
         await self.publish_for(duration_seconds, phase="measurement")
 
-    def _create_payload(self, phase: str, sent_at: int) -> bytes:
+    def _create_payload(
+            self,
+            phase: str,
+            sent_at: int,
+            load_step: LoadStep | None = None,
+    ) -> bytes:
         """Build a JSON message whose complete UTF-8 body has an exact size."""
         target_size = self.MESSAGE_SIZE * 1024
         payload = {
             "data": "",
             "phase": phase,
             "sent_at": sent_at,
+            "load_step": load_step.index if load_step else 0,
+            "target_rps": load_step.target_rps if load_step else self.TPS,
         }
         empty_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         data_size = target_size - len(empty_body)
@@ -217,9 +243,7 @@ async def main():
     parser.add_argument(
         "--broker-port", type=str, default="5672", required=False, help="RabbitMQ broker port"
     )
-    parser.add_argument(
-        "--rps", type=int, default=1, help="Request per second for message sending"
-    )
+    add_load_profile_arguments(parser)
     parser.add_argument(
         "--payload_size", type=int, default=1024, help="Payload size for message sending in Kbytes"
     )
@@ -236,8 +260,6 @@ async def main():
         help="RabbitMQ delivery topology",
     )
     args = parser.parse_args()
-    if args.rps <= 0:
-        parser.error("--rps must be greater than zero")
     if args.payload_size <= 0:
         parser.error("--payload_size must be greater than zero")
     if args.warmup_seconds < 0:
@@ -245,14 +267,19 @@ async def main():
     if args.duration_seconds <= 0:
         parser.error("--duration-seconds must be greater than zero")
 
+    try:
+        scheduler = scheduler_from_arguments(args, args.duration_seconds)
+    except ValueError as error:
+        parser.error(str(error))
+
     producer = Producer(
         queue_name="scenario",
         broker_host=args.broker_host,
         broker_port=args.broker_port,
 
         message_size=args.payload_size,
-        tps=int(args.rps),
         interaction_mode=args.interaction_mode,
+        load_scheduler=scheduler,
     )
     await producer._connect()
     await producer.declare_topology()

@@ -161,11 +161,12 @@ class ScenarioService:
             )
             scenario.containers.append(broker_container)
             scenario.container_ids_by_role["broker"].append(broker_container)
+            broker_hostname = broker_creator.broker_hostname(scenario_id)
 
             producer_config = dataclasses.replace(
                 scenario.config.producer_config,
                 docker_args=[*scenario.config.producer_config.docker_args,
-                "--broker-host", f"{scenario.config.broker_config.broker_type.value}-{scenario_id}",
+                "--broker-host", broker_hostname,
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 "--warmup-seconds", str(scenario.config.warmup_seconds),
                 "--duration-seconds", str(scenario.config.duration_seconds),
@@ -183,7 +184,7 @@ class ScenarioService:
             consumer_config = dataclasses.replace(
                 scenario.config.consumer_config,
                 docker_args=[*scenario.config.consumer_config.docker_args,
-                "--broker-host", f"{scenario.config.broker_config.broker_type.value}-{scenario_id}",
+                "--broker-host", broker_hostname,
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
                 ],
@@ -340,7 +341,7 @@ async def main():
                 docker_args=[]
             ),
             producer_config=ProducerConfig(
-                load_type=LoadType.linear,
+                load_type=LoadType.CONSTANT,
                 payload_size=1024,
                 rps=2,
                 guarantee_type=GuaranteeType.EXACTLY_ONCE,

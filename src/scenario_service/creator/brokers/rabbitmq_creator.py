@@ -25,7 +25,7 @@ class RabbitMQCreator(BaseBrokerCreator):
         container = await self.docker_service.create_container(
             container_config=ContainerConfig(
                 image=image,
-                name=f"rabbitmq-{scenario_id}",
+                name=self.broker_hostname(scenario_id),
                 network_name=f"network-{scenario_id}",
                 labels={"component": "broker"},
                 resources=ResourceLimits(
@@ -36,6 +36,9 @@ class RabbitMQCreator(BaseBrokerCreator):
             extra_labels={"scenario_id": scenario_id},
         )
         return container
+
+    def broker_hostname(self, scenario_id: str) -> str:
+        return f"rabbitmq-{scenario_id}"
 
     def interaction_mode_args(self, mode: InteractionMode) -> tuple[str, ...]:
         if mode not in (InteractionMode.WORK_QUEUE, InteractionMode.PUB_SUB):
