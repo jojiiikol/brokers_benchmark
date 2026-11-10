@@ -16,8 +16,8 @@ from src.scenario_service.creator.base.abstract_producer import BaseProducerCrea
 # from src.scenario_service.configurator import ComponentConfigurator
 from src.scenario_service.creator.base.abstract_service import BaseServiceCreator
 from src.scenario_service.creator.brokers.rabbitmq_creator import RabbitMQCreator
-from src.scenario_service.creator.consumer.consumer_creator import ConsumerCreator
-from src.scenario_service.creator.producer.producer_creator import ProducerCreator
+from src.scenario_service.creator.consumer.rabbitmq_consumer_creator import RabbitMQConsumerCreator
+from src.scenario_service.creator.producer.rabbitmq_producer_creator import RabbitMQProducerCreator
 from src.scenario_service.creator.brokers.kafka_creator import KafkaCreator
 from src.scenario_service.creator.consumer.kafka_consumer_creator import KafkaConsumerCreator
 from src.scenario_service.creator.producer.kafka_producer_creator import KafkaProducerCreator
@@ -83,13 +83,13 @@ class ScenarioService:
         self.docker_service = docker_service or SdkDockerService()
         # self.configurator = ComponentConfigurator(docker_service)
         self.producer_creators: dict[Brokers, BaseProducerCreator] = {
-            Brokers.RABBITMQ: ProducerCreator(self.docker_service),
+            Brokers.RABBITMQ: RabbitMQProducerCreator(self.docker_service),
             Brokers.KAFKA: KafkaProducerCreator(self.docker_service),
             Brokers.NATS_PULL: NatsPullProducerCreator(self.docker_service),
             Brokers.NATS_PUSH: NatsPushProducerCreator(self.docker_service),
         }
         self.consumer_creators: dict[Brokers, BaseConsumerCreator] = {
-            Brokers.RABBITMQ: ConsumerCreator(self.docker_service),
+            Brokers.RABBITMQ: RabbitMQConsumerCreator(self.docker_service),
             Brokers.KAFKA: KafkaConsumerCreator(self.docker_service),
             Brokers.NATS_PULL: NatsPullConsumerCreator(self.docker_service),
             Brokers.NATS_PUSH: NatsPushConsumerCreator(self.docker_service),
