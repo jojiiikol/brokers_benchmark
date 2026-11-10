@@ -9,11 +9,10 @@ from typing import AsyncGenerator
 from aiodocker.containers import DockerContainer
 from aiodocker.networks import DockerNetwork
 
-from src import setup_logging
 from src.config import CONTAINERS_NAMESPACE
 from src.docker_configurator import ContainerConfig, build_docker_payload
 import aiodocker
-setup_logging()
+
 logger = logging.getLogger("DockerService")
 
 class SdkDockerService:
