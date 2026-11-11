@@ -39,10 +39,16 @@ class Producer:
             message_size: int = 1024,
             interaction_mode: str = "work_queue",
             load_scheduler: LoadScheduler | None = None,
+            guarantee_type: str = "at_most_once",
+            max_in_flight: int = 100,
 
     ):
         if interaction_mode not in ("work_queue", "pub_sub"):
             raise ValueError(f"Unsupported interaction mode: {interaction_mode}")
+        if guarantee_type != "at_most_once":
+            raise ValueError(f"Unsupported producer guarantee: {guarantee_type}")
+        if max_in_flight <= 0:
+            raise ValueError("max_in_flight must be greater than zero")
         self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
 
         self._connection = None
@@ -61,6 +67,8 @@ class Producer:
 
         self.queue_name = queue_name
         self.interaction_mode = interaction_mode
+        self.guarantee_type = guarantee_type
+        self.max_in_flight = max_in_flight
 
 
     async def _connect(self):
@@ -71,8 +79,11 @@ class Producer:
         while attempts > 0:
             try:
                 self._connection = await aio_pika.connect_robust(self.CONNECTION_URL)
-                self._channel = await self._connection.channel()
-                logger.info("Connected to RabbitMQ at %s", self.CONNECTION_URL)
+                self._channel = await self._connection.channel(publisher_confirms=False)
+                logger.info(
+                    "Connected to RabbitMQ at %s with publisher confirms disabled",
+                    self.CONNECTION_URL,
+                )
                 return
             except AMQPConnectionError:
                 logger.warning("RabbitMQ is not ready, retrying in 5 seconds")
@@ -125,7 +136,7 @@ class Producer:
 
         message = aio_pika.Message(
             body=body,
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            delivery_mode=aio_pika.DeliveryMode.NOT_PERSISTENT,
             content_type="application/json",
         )
 
@@ -170,6 +181,7 @@ class Producer:
                 step.index,
                 step.target_rps,
             ),
+            max_in_flight=self.max_in_flight,
         )
         logger.info("Finished RabbitMQ %s phase", phase)
 
@@ -259,6 +271,10 @@ async def main():
         "--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue",
         help="RabbitMQ delivery topology",
     )
+    parser.add_argument(
+        "--guarantee-type", choices=("at_most_once",), default="at_most_once",
+        help="Producer delivery guarantee",
+    )
     args = parser.parse_args()
     if args.payload_size <= 0:
         parser.error("--payload_size must be greater than zero")
@@ -280,6 +296,8 @@ async def main():
         message_size=args.payload_size,
         interaction_mode=args.interaction_mode,
         load_scheduler=scheduler,
+        guarantee_type=args.guarantee_type,
+        max_in_flight=args.max_in_flight,
     )
     await producer._connect()
     await producer.declare_topology()

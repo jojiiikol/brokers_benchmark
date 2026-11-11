@@ -344,7 +344,7 @@ async def main():
                 load_type=LoadType.CONSTANT,
                 payload_size=1024,
                 rps=2,
-                guarantee_type=GuaranteeType.EXACTLY_ONCE,
+                guarantee_type=GuaranteeType.AT_MOST_ONCE,
                 count=1,
                 docker_args=["--rps", "5"]
             )

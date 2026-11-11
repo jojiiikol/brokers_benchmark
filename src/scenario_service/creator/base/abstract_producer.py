@@ -14,7 +14,15 @@ class BaseProducerCreator(BaseServiceCreator):
             *args,
             **kwargs
     ):
-        docker_args = [*config.docker_args, "--load-type", config.load_type.value]
+        docker_args = [
+            *config.docker_args,
+            "--load-type",
+            config.load_type.value,
+            "--guarantee-type",
+            config.guarantee_type.value,
+            "--max-in-flight",
+            str(config.max_in_flight),
+        ]
         if config.load_type is LoadType.CONSTANT:
             docker_args.extend(("--rps", str(config.rps)))
         elif config.load_type is LoadType.LINEAR:

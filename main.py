@@ -24,7 +24,7 @@ async def main() -> None:
                     broker_type=Brokers.RABBITMQ
                 ),
                 consumer_config=ConsumerConfig(
-                    count=1,
+                    count=5,
                     docker_args=[],
                     broker_connection=BrokerConnection(
                         broker_type=Brokers.RABBITMQ,
@@ -40,8 +40,9 @@ async def main() -> None:
                     rps=100,
                     end_rps=1000000,
                     step_duration_seconds=10,
-                    guarantee_type=GuaranteeType.EXACTLY_ONCE,
-                    count=1,
+                    guarantee_type=GuaranteeType.AT_MOST_ONCE,
+                    count=5,
+                    max_in_flight=500,
                     docker_args=[],
                     broker_connection=BrokerConnection(
                         broker_type=Brokers.RABBITMQ,

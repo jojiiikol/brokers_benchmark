@@ -33,6 +33,7 @@ class ProducerConfig:
     broker_connection: BrokerConnection
     end_rps: int | None = None
     step_duration_seconds: float | None = None
+    max_in_flight: int = 100
 
     def __post_init__(self) -> None:
         if self.rps <= 0:
@@ -41,6 +42,14 @@ class ProducerConfig:
             raise ValueError("payload_size must be greater than zero")
         if self.count <= 0:
             raise ValueError("count must be greater than zero")
+        if self.max_in_flight <= 0:
+            raise ValueError("max_in_flight must be greater than zero")
+        if self.guarantee_type is not GuaranteeType.AT_MOST_ONCE:
+            raise ValueError(
+                "Only at_most_once is implemented. "
+                "Do not label a run as at_least_once or exactly_once until "
+                "their acknowledgement semantics are implemented."
+            )
 
         if self.load_type is LoadType.CONSTANT:
             if self.end_rps is not None or self.step_duration_seconds is not None:

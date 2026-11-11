@@ -32,6 +32,8 @@ class KafkaProducer:
             payload_size: int = 1,
             interaction_mode: str = "work_queue",
             load_scheduler: LoadScheduler | None = None,
+            guarantee_type: str = "at_most_once",
+            max_in_flight: int = 100,
     ) -> None:
         if rps <= 0:
             raise ValueError("rps must be greater than zero")
@@ -39,12 +41,18 @@ class KafkaProducer:
             raise ValueError("payload_size must be greater than zero")
         if interaction_mode not in ("work_queue", "pub_sub"):
             raise ValueError(f"Unsupported interaction mode: {interaction_mode}")
+        if guarantee_type != "at_most_once":
+            raise ValueError(f"Unsupported producer guarantee: {guarantee_type}")
+        if max_in_flight <= 0:
+            raise ValueError("max_in_flight must be greater than zero")
 
         self.bootstrap_servers = f"{broker_host}:{broker_port}"
         self.rps = rps
         self.load_scheduler = load_scheduler
         self.payload_size = payload_size
         self.interaction_mode = interaction_mode
+        self.guarantee_type = guarantee_type
+        self.max_in_flight = max_in_flight
         self._producer: AIOKafkaProducer | None = None
 
     async def connect(self) -> None:
@@ -53,11 +61,17 @@ class KafkaProducer:
 
         attempts = 12
         while attempts > 0:
-            producer = AIOKafkaProducer(bootstrap_servers=self.bootstrap_servers)
+            producer = AIOKafkaProducer(
+                bootstrap_servers=self.bootstrap_servers,
+                acks=0,
+            )
             try:
                 await producer.start()
                 self._producer = producer
-                logger.info("Connected to Kafka at %s", self.bootstrap_servers)
+                logger.info(
+                    "Connected to Kafka at %s with acks=0",
+                    self.bootstrap_servers,
+                )
                 return
             except KafkaConnectionError:
                 await producer.stop()
@@ -74,7 +88,10 @@ class KafkaProducer:
             sent_at=time.monotonic_ns(),
             load_step=load_step,
         )
-        await self._producer.send_and_wait(TOPIC_NAME, body)
+        # send() only queues the record for transmission. With acks=0 we do
+        # not wait for a broker acknowledgement, so a lost record is not
+        # retried by this benchmark producer.
+        await self._producer.send(TOPIC_NAME, body)
 
     async def publish_for(self, duration_seconds: float, phase: str) -> None:
         if self.load_scheduler is None:
@@ -95,6 +112,7 @@ class KafkaProducer:
                 step.index,
                 step.target_rps,
             ),
+            max_in_flight=self.max_in_flight,
         )
         logger.info("Finished Kafka %s phase", phase)
 
@@ -151,6 +169,7 @@ async def main() -> None:
     parser.add_argument("--warmup-seconds", type=float, default=0)
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
+    parser.add_argument("--guarantee-type", choices=("at_most_once",), default="at_most_once")
     args = parser.parse_args()
     if args.warmup_seconds < 0:
         parser.error("--warmup-seconds must be greater than or equal to zero")
@@ -169,6 +188,8 @@ async def main() -> None:
         payload_size=args.payload_size,
         interaction_mode=args.interaction_mode,
         load_scheduler=scheduler,
+        guarantee_type=args.guarantee_type,
+        max_in_flight=args.max_in_flight,
     )
     try:
         await producer.connect()
