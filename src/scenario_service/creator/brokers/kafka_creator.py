@@ -2,21 +2,35 @@ from src.docker_configurator import ContainerConfig
 from src.docker_configurator.schema import ResourceLimits
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
-from src.scenario_service.dto.broker_config import BrokerConfig
+from src.scenario_service.dto.broker_config import (
+    BrokerConfig,
+    MAX_KAFKA_WORK_QUEUE_PARTITIONS,
+)
 from src.scenario_service.dto.interaction_mode import InteractionMode
 
 class KafkaCreator(BaseBrokerCreator):
     """Create one isolated, single-node Kafka broker for a scenario."""
 
-    TOPIC_PARTITIONS = 16
+    MAX_WORK_QUEUE_PARTITIONS = MAX_KAFKA_WORK_QUEUE_PARTITIONS
 
     async def configurate(
             self,
             scenario_id: str,
             config: BrokerConfig,
+            topic_partitions: int | None = None,
             *args,
             **kwargs,
     ) -> str | None:
+        partitions = (
+            self.MAX_WORK_QUEUE_PARTITIONS
+            if topic_partitions is None
+            else topic_partitions
+        )
+        if not 1 <= partitions <= self.MAX_WORK_QUEUE_PARTITIONS:
+            raise ValueError(
+                "Kafka topic partitions must be between 1 and "
+                f"{self.MAX_WORK_QUEUE_PARTITIONS}"
+            )
         broker_name = self.broker_hostname(scenario_id)
         image = await self.docker_service.get_image(tag="apache/kafka:4.4.0")
         return await self.docker_service.create_container(
@@ -39,7 +53,7 @@ class KafkaCreator(BaseBrokerCreator):
                     "KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR": "1",
                     "KAFKA_TRANSACTION_STATE_LOG_MIN_ISR": "1",
                     "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS": "0",
-                    "KAFKA_NUM_PARTITIONS": str(self.TOPIC_PARTITIONS),
+                    "KAFKA_NUM_PARTITIONS": str(partitions),
                     "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "true",
                 },
                 resources=ResourceLimits(

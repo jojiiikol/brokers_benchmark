@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Protocol
 
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.dto.scenario_config import ScenarioConfig
@@ -7,16 +8,29 @@ from src.scenario_service.service import ScenarioService, Scenario, ScenarioStat
 
 logger = logging.getLogger(__name__)
 
+
+class ScenarioObserver(Protocol):
+    """Optional observer of scenario state, independent from a metrics backend."""
+
+    async def update(self, scenarios: list, active_task_count: int) -> None: ...
+
+
 class Orchestrator:
     MAX_RUNNING_SCENARIO_COUNT: int = 5
 
-    def __init__(self):
+    def __init__(self, observer: ScenarioObserver | None = None):
         self.docker_service = SdkDockerService()
         self.scenario_service = ScenarioService(self.docker_service)
         self.scenario_storage: list = []
         self.scenario_tasks: dict[str, asyncio.Task] = {}
+        self._shutdown_complete = False
+        self._observer = observer
 
         self.create_image_lock = asyncio.Lock()
+
+    def set_observer(self, observer: ScenarioObserver | None) -> None:
+        """Attach or detach an optional scenario observer at runtime."""
+        self._observer = observer
 
     @property
     def scenario_running_count(self) -> int:
@@ -62,6 +76,7 @@ class Orchestrator:
     ) -> str:
         scenario = await self.scenario_service.create_scenario(scenario_config)
         self.scenario_storage.append(scenario)
+        await self._notify_observer()
         return scenario.id
 
     async def start_scenario(self):
@@ -92,12 +107,25 @@ class Orchestrator:
     async def _process(self) -> None:
         while True:
             self._collect_finished_tasks()
+            await self._notify_observer()
             logger.info(self.get_info())
             await self._initialize_scenario()
             await self.start_scenario()
 
 
             await asyncio.sleep(3)
+
+    async def _notify_observer(self) -> None:
+        if self._observer is None:
+            return
+        try:
+            await self._observer.update(
+                self.scenario_storage,
+                active_task_count=len(self.scenario_tasks),
+            )
+        except Exception:
+            # Observability must never prevent a benchmark from running.
+            logger.exception("Scenario observer update failed")
 
     def _collect_finished_tasks(self) -> None:
         for scenario_id, task in list(self.scenario_tasks.items()):
@@ -111,9 +139,47 @@ class Orchestrator:
             except Exception:
                 logger.exception("Scenario %s task failed", scenario_id)
 
-    async def run(self):
-        task = asyncio.create_task(self._process())
+    async def shutdown(self) -> None:
+        """Stop active scenario tasks and remove all dynamic Docker resources."""
+        if self._shutdown_complete:
+            return
+
+        logger.info("Stopping %s active scenario task(s)", len(self.scenario_tasks))
+        tasks = list(self.scenario_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.scenario_tasks.clear()
+        await self._notify_observer()
+
+        await self.docker_service.clear_resources()
+        self._shutdown_complete = True
+        logger.info("Dynamic benchmark resources were cleaned up")
+
+    async def run(self, stop_event: asyncio.Event | None = None) -> None:
+        task = asyncio.create_task(self._process(), name="orchestrator-process")
+        stop_task = (
+            asyncio.create_task(stop_event.wait(), name="orchestrator-stop-wait")
+            if stop_event is not None
+            else None
+        )
         try:
+            if stop_task is None:
+                await task
+                return
+
+            done, _ = await asyncio.wait(
+                (task, stop_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                logger.info("Shutdown signal received")
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await self.shutdown()
+                return
+
             await task
         except asyncio.CancelledError:
             logger.info("Process cancelled")
@@ -121,3 +187,10 @@ class Orchestrator:
         except Exception:
             logger.exception("Process failed")
             raise
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            if stop_task is not None and not stop_task.done():
+                stop_task.cancel()
+                await asyncio.gather(stop_task, return_exceptions=True)

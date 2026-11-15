@@ -141,6 +141,7 @@ async def publish_with_profile(
         publish: Callable[[LoadStep], Awaitable[None]],
         on_step: Callable[[LoadStep], None],
         max_in_flight: int = 100,
+        on_in_flight_changed: Callable[[int], None] | None = None,
 ) -> None:
     """Call ``publish`` at the current target rate for one phase.
 
@@ -177,6 +178,8 @@ async def publish_with_profile(
                 continue
 
             in_flight.add(asyncio.create_task(publish(step)))
+            if on_in_flight_changed is not None:
+                on_in_flight_changed(len(in_flight))
             next_publish_at = max(next_publish_at + 1 / step.target_rps, loop.time())
 
             if len(in_flight) >= max_in_flight:
@@ -185,9 +188,15 @@ async def publish_with_profile(
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 in_flight.difference_update(completed)
+                if on_in_flight_changed is not None:
+                    on_in_flight_changed(len(in_flight))
                 # Propagate a publish error instead of silently treating a
                 # failed local hand-off as a sent message.
                 await asyncio.gather(*completed)
     finally:
-        if in_flight:
-            await asyncio.gather(*in_flight)
+        try:
+            if in_flight:
+                await asyncio.gather(*in_flight)
+        finally:
+            if on_in_flight_changed is not None:
+                on_in_flight_changed(0)

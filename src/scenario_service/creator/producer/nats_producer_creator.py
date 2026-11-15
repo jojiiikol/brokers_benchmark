@@ -2,7 +2,7 @@ from src.scenario_service.creator.producer.producer_creator import ProducerCreat
 
 
 class _NatsProducerCreator(ProducerCreator):
-    def component_broker_type(self, config) -> str:
+    def component_broker_type(self, broker_type) -> str:
         return "nats"
 
 

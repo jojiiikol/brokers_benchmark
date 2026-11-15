@@ -2,8 +2,6 @@ import dataclasses
 import enum
 from typing import Any
 
-from .broker_config import BrokerConnection
-
 
 class LoadType(enum.Enum):
     CONSTANT = "constant"
@@ -29,8 +27,6 @@ class ProducerConfig:
     rps: int
     guarantee_type: GuaranteeType
     count: int
-    docker_args: list[str]
-    broker_connection: BrokerConnection
     end_rps: int | None = None
     step_duration_seconds: float | None = None
     max_in_flight: int = 100

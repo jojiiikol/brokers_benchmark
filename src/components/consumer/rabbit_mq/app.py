@@ -1,8 +1,6 @@
 import asyncio
-import json
 import logging
 import time
-from typing import Any
 
 import aio_pika
 from aiormq import AMQPConnectionError
@@ -10,16 +8,20 @@ from dotenv import load_dotenv
 import argparse
 import math
 from src.logger.config import setup_logging
+from src.components.common.message_payload import (
+    InvalidBenchmarkMessage,
+    decode_message_fields,
+)
+from src.components.common.prometheus_metrics import (
+    ConsumerPrometheusMetrics,
+    start_metrics_server,
+)
 load_dotenv()
 logger = logging.getLogger("benchmark.consumer.rabbitmq")
 
 
 class LatencyMetrics:
-    """In-memory percentile aggregation for one measurement phase.
-
-    Percentiles use linear interpolation between adjacent sorted samples. This
-    keeps p50/p75/p95/p99 stable and well-defined even for small samples.
-    """
+    """In-memory percentile aggregation for one measurement phase."""
 
     PERCENTILES = (50, 75, 95, 99)
 
@@ -28,6 +30,10 @@ class LatencyMetrics:
 
     def observe(self, latency_ms: float) -> None:
         self._values_ms.append(latency_ms)
+
+    @property
+    def count(self) -> int:
+        return len(self._values_ms)
 
     def summary(self) -> dict[str, float | int | None]:
         result: dict[str, float | int | None] = {"count": len(self._values_ms)}
@@ -38,7 +44,6 @@ class LatencyMetrics:
     def _percentile(self, percentile: int) -> float | None:
         if not self._values_ms:
             return None
-
         values = sorted(self._values_ms)
         rank = (len(values) - 1) * percentile / 100
         lower = math.floor(rank)
@@ -59,14 +64,23 @@ class Consumer:
             broker_password: str = "guest",
             broker_host: str = "rabbit_mq",
             broker_port: str = "5672",
-            metrics_report_interval_seconds: float = 5,
+            metrics_window_size: int = 100,
+            latency_sample_every: int = 10,
+            metrics_log_every_windows: int = 10,
             interaction_mode: str = "work_queue",
+            guarantee_type: str = "at_most_once",
 
     ):
-        if metrics_report_interval_seconds <= 0:
-            raise ValueError("metrics_report_interval_seconds must be greater than zero")
+        if metrics_window_size <= 0:
+            raise ValueError("metrics_window_size must be greater than zero")
+        if latency_sample_every <= 0:
+            raise ValueError("latency_sample_every must be greater than zero")
+        if metrics_log_every_windows <= 0:
+            raise ValueError("metrics_log_every_windows must be greater than zero")
         if interaction_mode not in ("work_queue", "pub_sub"):
             raise ValueError(f"Unsupported interaction mode: {interaction_mode}")
+        if guarantee_type not in ("at_most_once", "at_least_once", "exactly_once"):
+            raise ValueError(f"Unsupported delivery guarantee: {guarantee_type}")
         self.CONNECTION_URL = f"amqp://{broker_user}:{broker_password}@{broker_host}:{broker_port}/"
 
         self._connection = None
@@ -76,11 +90,19 @@ class Consumer:
 
         self.queue_name = queue_name
         self.interaction_mode = interaction_mode
+        self.guarantee_type = guarantee_type
         self.metrics = LatencyMetrics()
-        self.metrics_by_load_step: dict[tuple[int, int], LatencyMetrics] = {}
-        self.metrics_report_interval_seconds = metrics_report_interval_seconds
-        self._last_metrics_report_at: float | None = None
+        self.metrics_window_size = metrics_window_size
+        self.latency_sample_every = latency_sample_every
+        self.metrics_log_every_windows = metrics_log_every_windows
+        self.received_messages_total = 0
+        self.measurement_messages_total = 0
+        self._completed_metrics_windows = 0
+        self.prometheus_metrics = ConsumerPrometheusMetrics("rabbitmq")
 
+    @property
+    def uses_acknowledgements(self) -> bool:
+        return self.guarantee_type != "at_most_once"
 
     async def _connect(self):
         if self._connection is not None:
@@ -123,56 +145,51 @@ class Consumer:
             )
             logger.info("Declared RabbitMQ work queue %s", self.queue_name)
 
-    def latency(self, message: dict[str, Any], received_at: int) -> float | None:
-        sent_at: float | None  = message.get("sent_at", None)
-        if sent_at is None:
-            logger.warning(f"Received message not have sent_at field: {message}")
-            return None
-
-        return (received_at - sent_at) / 1_000_000
-
     async def consume(self) -> None:
         if self._channel is None or self._queue is None:
             raise RuntimeError("Consumer is not connected")
 
 
-        loop = asyncio.get_running_loop()
-        self._last_metrics_report_at = loop.time()
-        logger.info("Started RabbitMQ consumption: mode=%s", self.interaction_mode)
+        no_ack = not self.uses_acknowledgements
+        logger.info(
+            "Started RabbitMQ consumption: mode=%s no_ack=%s",
+            self.interaction_mode,
+            no_ack,
+        )
         try:
-            async with self._queue.iterator() as queue_iter:
+            async with self._queue.iterator(no_ack=no_ack) as queue_iter:
                 async for message in queue_iter:
-                    async with message.process():
-                        received_at = time.monotonic_ns()
-                        decode_message = json.loads(message.body.decode("utf-8"))
-
-                        latency = self.latency(decode_message, received_at)
-                        phase = decode_message.get("phase", "unknown")
-                        if phase == "measurement" and latency is not None:
-                            self.metrics.observe(latency)
-                            self._metrics_for_load_step(decode_message).observe(latency)
-                            self._report_metrics_if_due(loop.time())
-
-                        logger.debug(
-                            "Phase=%s message=%s latency_ms=%s",
-                            phase,
-                            message.body[:100],
-                            latency,
-                        )
+                    if no_ack:
+                        self._observe_message(message.body)
+                    else:
+                        async with message.process():
+                            self._observe_message(message.body)
         finally:
             self._log_metrics(final=True)
 
-    def _report_metrics_if_due(self, now: float) -> None:
-        if self._last_metrics_report_at is None:
-            self._last_metrics_report_at = now
-        if now - self._last_metrics_report_at >= self.metrics_report_interval_seconds:
-            self._log_metrics(final=False)
-            self._last_metrics_report_at = now
+    def _observe_message(self, body: bytes) -> None:
+        try:
+            phase, sent_at = decode_message_fields(body)
+        except InvalidBenchmarkMessage as error:
+            logger.warning("Received malformed benchmark message: %s", error)
+            return
 
-    def _metrics_for_load_step(self, message: dict[str, Any]) -> LatencyMetrics:
-        step = int(message.get("load_step", 0))
-        target_rps = int(message.get("target_rps", 0))
-        return self.metrics_by_load_step.setdefault((step, target_rps), LatencyMetrics())
+        self.received_messages_total += 1
+        self.prometheus_metrics.received(phase)
+        if phase == "measurement":
+            self.measurement_messages_total += 1
+            if self.measurement_messages_total % self.latency_sample_every == 0:
+                latency_seconds = (time.monotonic_ns() - sent_at) / 1_000_000_000
+                self.metrics.observe(latency_seconds * 1000)
+                self.prometheus_metrics.observe_latency_seconds(latency_seconds)
+                self._report_metrics_if_window_complete()
+
+    def _report_metrics_if_window_complete(self) -> None:
+        if self.metrics.count >= self.metrics_window_size:
+            self._completed_metrics_windows += 1
+            if self._completed_metrics_windows % self.metrics_log_every_windows == 0:
+                self._log_metrics(final=False)
+            self.metrics = LatencyMetrics()
 
     def _log_metrics(self, *, final: bool) -> None:
         summary = self.metrics.summary()
@@ -180,31 +197,19 @@ class Consumer:
             return
         prefix = "Final latency metrics" if final else "Latency metrics"
         logger.info(
-            "%s | samples=%s | p50_ms=%.3f | p75_ms=%.3f | "
+            "%s | latency_window=%s | samples=%s | received_total=%s | measurement_received_total=%s | "
+            "p50_ms=%.3f | p75_ms=%.3f | "
             "p95_ms=%.3f | p99_ms=%.3f",
             prefix,
+            self._completed_metrics_windows,
             summary["count"],
+            self.received_messages_total,
+            self.measurement_messages_total,
             summary["p50_ms"],
             summary["p75_ms"],
             summary["p95_ms"],
             summary["p99_ms"],
         )
-        for (step, target_rps), step_metrics in sorted(self.metrics_by_load_step.items()):
-            step_summary = step_metrics.summary()
-            logger.info(
-                "%s | load_step=%s | target_rps=%s | samples=%s | "
-                "p50_ms=%.3f | p75_ms=%.3f | p95_ms=%.3f | p99_ms=%.3f",
-                prefix,
-                step,
-                target_rps,
-                step_summary["count"],
-                step_summary["p50_ms"],
-                step_summary["p75_ms"],
-                step_summary["p95_ms"],
-                step_summary["p99_ms"],
-            )
-
-
     async def close(self) -> None:
         if self._connection is not None:
             await self._connection.close()
@@ -236,12 +241,19 @@ async def main():
         "--broker-port", type=str, default="5672", required=False, help="RabbitMQ broker port"
     )
     parser.add_argument(
-        "--metrics-report-interval-seconds", type=float, default=5,
-        help="How often to log measurement latency percentiles",
+        "--metrics-window-size", type=int, default=1000,
+        help="Number of latency samples in one percentile window",
     )
+    parser.add_argument("--latency-sample-every", type=int, default=10)
+    parser.add_argument("--metrics-log-every-windows", type=int, default=100)
     parser.add_argument(
         "--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue",
         help="RabbitMQ delivery topology",
+    )
+    parser.add_argument(
+        "--guarantee-type",
+        choices=("at_most_once", "at_least_once", "exactly_once"),
+        default="at_most_once",
     )
     args = parser.parse_args()
 
@@ -249,9 +261,13 @@ async def main():
         queue_name="scenario",
         broker_host=args.broker_host,
         broker_port=args.broker_port,
-        metrics_report_interval_seconds=args.metrics_report_interval_seconds,
+        metrics_window_size=args.metrics_window_size,
+        latency_sample_every=args.latency_sample_every,
+        metrics_log_every_windows=args.metrics_log_every_windows,
         interaction_mode=args.interaction_mode,
+        guarantee_type=args.guarantee_type,
     )
+    start_metrics_server()
     await consumer._connect()
     await consumer.declare_queue()
     await consumer.consume(

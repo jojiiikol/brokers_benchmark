@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: orchestrator
+    static_configs:
+      - targets: ["orchestrator:8000"]
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: benchmark-components
+    metrics_path: /metrics
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        match_first_network: false
+        filters:
+          - name: label
+            values: ["namespace=brokers_benchmark"]
+          - name: label
+            values: ["prometheus.scrape=true"]
+    relabel_configs:
+      - source_labels: [__meta_docker_network_name]
+        regex: brokers_benchmark_observability
+        action: keep
+      - source_labels: [__meta_docker_container_label_prometheus_scrape]
+        regex: "true"
+        action: keep
+      - source_labels: [__meta_docker_network_ip, __meta_docker_port_private]
+        separator: ";"
+        regex: "(.+);(.+)"
+        target_label: __address__
+        replacement: "$1:$2"
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.+)"
+        target_label: instance
+        replacement: "$1"
+      - source_labels: [__meta_docker_container_label_component]
+        target_label: component
+      - source_labels: [__meta_docker_container_label_scenario_id]
+        target_label: scenario_id

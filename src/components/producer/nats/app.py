@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import json
 import logging
 import time
 
@@ -10,11 +9,16 @@ from nats.js.api import RetentionPolicy, StorageType, StreamConfig
 from nats.js.errors import APIError, NotFoundError
 from src.components.common.load_profile import (
     LoadScheduler,
-    LoadStep,
     add_load_profile_arguments,
     publish_with_profile,
     scheduler_from_arguments,
 )
+from src.components.common.producer_metrics import ProducerMetrics
+from src.components.common.prometheus_metrics import (
+    ProducerPrometheusMetrics,
+    start_metrics_server,
+)
+from src.components.common.message_payload import build_message
 from src.logger.config import setup_logging
 
 
@@ -34,6 +38,7 @@ class NatsProducer:
             load_scheduler: LoadScheduler,
             guarantee_type: str = "at_most_once",
             max_in_flight: int = 100,
+            metrics_report_interval_seconds: float = 5,
     ) -> None:
         if rps <= 0 or payload_size <= 0:
             raise ValueError("rps and payload_size must be greater than zero")
@@ -47,6 +52,11 @@ class NatsProducer:
         self.load_scheduler = load_scheduler
         self.guarantee_type = guarantee_type
         self.max_in_flight = max_in_flight
+        self.metrics = ProducerMetrics(
+            logger,
+            metrics_report_interval_seconds,
+            sink=ProducerPrometheusMetrics("nats"),
+        )
         self.nc = None
         self.js = None
 
@@ -85,8 +95,8 @@ class NatsProducer:
             # Concurrent producers can race to create the same stream.
             await self.js.stream_info(STREAM_NAME)
 
-    async def publish(self, phase: str, load_step: LoadStep) -> None:
-        body = self._create_payload(phase, time.monotonic_ns(), load_step)
+    async def publish(self, phase: str) -> None:
+        body = self._create_payload(phase, time.monotonic_ns())
         # The stream still receives this subject, but Core NATS publish does
         # not wait for JetStream's PubAck. This is producer-side at-most-once.
         await self.nc.publish(SUBJECT, body)
@@ -98,41 +108,38 @@ class NatsProducer:
             duration_seconds,
             self.load_scheduler.load_type.value,
         )
-        await publish_with_profile(
-            scheduler=self.load_scheduler,
-            duration_seconds=duration_seconds,
-            publish=lambda step: self.publish(phase, step),
-            on_step=lambda step: logger.info(
-                "NATS %s load step=%s target_rps=%s",
-                phase,
-                step.index,
-                step.target_rps,
-            ),
-            max_in_flight=self.max_in_flight,
-        )
+        self.metrics.begin_phase(phase)
+        try:
+            await publish_with_profile(
+                scheduler=self.load_scheduler,
+                duration_seconds=duration_seconds,
+                publish=lambda step: self.metrics.track(
+                    self.payload_size * 1024,
+                    lambda: self.publish(phase),
+                ),
+                on_step=lambda step: logger.info(
+                    "NATS %s target_rps=%s",
+                    phase,
+                    step.target_rps,
+                ),
+                max_in_flight=self.max_in_flight,
+                on_in_flight_changed=self.metrics.set_in_flight,
+            )
+        finally:
+            self.metrics.log_final()
         logger.info("Finished NATS %s phase", phase)
 
     async def run_benchmark(self, warmup_seconds: float, duration_seconds: float) -> None:
         await self.publish_for(warmup_seconds, "warmup")
         await self.publish_for(duration_seconds, "measurement")
 
-    def _create_payload(self, phase: str, sent_at: int, load_step: LoadStep) -> bytes:
+    def _create_payload(self, phase: str, sent_at: int) -> bytes:
         target_size = self.payload_size * 1024
-        payload = {
-            "data": "",
-            "phase": phase,
-            "sent_at": sent_at,
-            "load_step": load_step.index,
-            "target_rps": load_step.target_rps,
-        }
-        padding = target_size - len(json.dumps(payload, separators=(",", ":")).encode())
-        if padding < 0:
-            raise ValueError("Message metadata is larger than the requested payload size")
-        payload["data"] = "a" * padding
-        body = json.dumps(payload, separators=(",", ":")).encode()
-        if len(body) != target_size:
-            raise RuntimeError("Unexpected message size")
-        return body
+        return build_message(
+            size_bytes=target_size,
+            phase=phase,
+            sent_at=sent_at,
+        )
 
     async def close(self) -> None:
         if self.nc is not None:
@@ -151,6 +158,7 @@ async def main() -> None:
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once",), default="at_most_once")
+    parser.add_argument("--metrics-report-interval-seconds", type=float, default=5)
     args = parser.parse_args()
     if args.warmup_seconds < 0 or args.duration_seconds <= 0:
         parser.error("Invalid benchmark durations")
@@ -166,7 +174,9 @@ async def main() -> None:
         scheduler,
         args.guarantee_type,
         args.max_in_flight,
+        args.metrics_report_interval_seconds,
     )
+    start_metrics_server()
     try:
         await producer.connect()
         await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)

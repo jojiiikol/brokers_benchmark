@@ -3,6 +3,7 @@ import dataclasses
 
 from src.scenario_service.creator.base.abstract_service import BaseServiceCreator
 from src.scenario_service.dto.producer_config import LoadType, ProducerConfig
+from src.scenario_service.dto.broker_config import Brokers
 
 
 class BaseProducerCreator(BaseServiceCreator):
@@ -10,12 +11,14 @@ class BaseProducerCreator(BaseServiceCreator):
             self,
             scenario_id: str,
             config: ProducerConfig,
+            broker_type: Brokers,
+            docker_args: list[str],
             instance_index: int | None = None,
             *args,
             **kwargs
     ):
-        docker_args = [
-            *config.docker_args,
+        launch_args = [
+            *docker_args,
             "--load-type",
             config.load_type.value,
             "--guarantee-type",
@@ -24,9 +27,9 @@ class BaseProducerCreator(BaseServiceCreator):
             str(config.max_in_flight),
         ]
         if config.load_type is LoadType.CONSTANT:
-            docker_args.extend(("--rps", str(config.rps)))
+            launch_args.extend(("--rps", str(config.rps)))
         elif config.load_type is LoadType.LINEAR:
-            docker_args.extend(
+            launch_args.extend(
                 (
                     "--start-rps",
                     str(config.rps),
@@ -38,11 +41,12 @@ class BaseProducerCreator(BaseServiceCreator):
             )
         else:
             raise ValueError(f"Unsupported load type {config.load_type.value}")
-        docker_args.extend(("--payload_size", str(config.payload_size)))
-        container_config = dataclasses.replace(config, docker_args=docker_args)
+        launch_args.extend(("--payload_size", str(config.payload_size)))
         return await super().configurate(
             scenario_id,
-            container_config,
+            config,
+            broker_type=broker_type,
+            docker_args=launch_args,
             instance_index=instance_index,
             *args,
             **kwargs,

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Benchmark
+    orgId: 1
+    folder: Benchmark
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards

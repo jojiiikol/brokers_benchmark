@@ -6,5 +6,5 @@ from src.scenario_service.dto.producer_config import ProducerConfig
 class RabbitMQProducerCreator(ProducerCreator):
     """Create producer containers that use the RabbitMQ component image."""
 
-    def component_broker_type(self, config: ProducerConfig) -> str:
+    def component_broker_type(self, broker_type: Brokers) -> str:
         return Brokers.RABBITMQ.value

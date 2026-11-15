@@ -1,10 +1,8 @@
 import argparse
 import asyncio
-import json
 import logging
 import math
 import time
-from typing import Any
 
 import nats
 from nats.errors import NoServersError, TimeoutError
@@ -18,6 +16,14 @@ from nats.js.api import (
 )
 from nats.js.errors import APIError, NotFoundError
 from src.logger.config import setup_logging
+from src.components.common.message_payload import (
+    InvalidBenchmarkMessage,
+    decode_message_fields,
+)
+from src.components.common.prometheus_metrics import (
+    ConsumerPrometheusMetrics,
+    start_metrics_server,
+)
 
 
 STREAM_NAME = "SCENARIO"
@@ -34,6 +40,10 @@ class LatencyMetrics:
 
     def observe(self, value: float) -> None:
         self.values_ms.append(value)
+
+    @property
+    def count(self) -> int:
+        return len(self.values_ms)
 
     def summary(self) -> dict[str, float | int | None]:
         result: dict[str, float | int | None] = {"count": len(self.values_ms)}
@@ -55,7 +65,9 @@ class NatsConsumer:
             consumer_name: str,
             consumer_mode: str,
             interaction_mode: str,
-            metrics_report_interval_seconds: float,
+            metrics_window_size: int = 100,
+            latency_sample_every: int = 10,
+            metrics_log_every_windows: int = 10,
     ) -> None:
         if consumer_mode not in ("pull", "push"):
             raise ValueError(f"Unsupported consumer mode {consumer_mode}")
@@ -63,12 +75,18 @@ class NatsConsumer:
         self.consumer_name = consumer_name
         self.consumer_mode = consumer_mode
         self.interaction_mode = interaction_mode
-        self.metrics_report_interval_seconds = metrics_report_interval_seconds
+        if min(metrics_window_size, latency_sample_every, metrics_log_every_windows) <= 0:
+            raise ValueError("metrics window, sampling and logging intervals must be greater than zero")
+        self.metrics_window_size = metrics_window_size
+        self.latency_sample_every = latency_sample_every
+        self.metrics_log_every_windows = metrics_log_every_windows
         self.nc = None
         self.js = None
         self.metrics = LatencyMetrics()
-        self.metrics_by_load_step: dict[tuple[int, int], LatencyMetrics] = {}
-        self.last_report_at: float | None = None
+        self.received_messages_total = 0
+        self.measurement_messages_total = 0
+        self._completed_metrics_windows = 0
+        self.prometheus_metrics = ConsumerPrometheusMetrics("nats")
 
     async def connect(self) -> None:
         for _ in range(12):
@@ -123,7 +141,6 @@ class NatsConsumer:
         return config
 
     async def consume(self) -> None:
-        self.last_report_at = asyncio.get_running_loop().time()
         logger.info(
             "Started NATS consumption: delivery_mode=%s interaction_mode=%s consumer=%s",
             self.consumer_mode, self.interaction_mode, self.consumer_name,
@@ -172,52 +189,43 @@ class NatsConsumer:
 
     def _observe(self, body: bytes) -> None:
         try:
-            message: dict[str, Any] = json.loads(body.decode())
-            phase = message.get("phase", "unknown")
-            sent_at = message.get("sent_at")
-            if sent_at is None:
-                return
-            latency = (time.monotonic_ns() - sent_at) / 1_000_000
+            phase, sent_at = decode_message_fields(body)
+            self.received_messages_total += 1
+            self.prometheus_metrics.received(phase)
             if phase == "measurement":
-                self.metrics.observe(latency)
-                self._metrics_for_load_step(message).observe(latency)
-                self._report_metrics_if_due(asyncio.get_running_loop().time())
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            logger.warning("Received malformed benchmark message")
+                self.measurement_messages_total += 1
+                if self.measurement_messages_total % self.latency_sample_every == 0:
+                    latency_seconds = (time.monotonic_ns() - sent_at) / 1_000_000_000
+                    self.metrics.observe(latency_seconds * 1000)
+                    self.prometheus_metrics.observe_latency_seconds(latency_seconds)
+                    self._report_metrics_if_window_complete()
+        except InvalidBenchmarkMessage as error:
+            logger.warning("Received malformed benchmark message: %s", error)
 
-    def _report_metrics_if_due(self, now: float) -> None:
-        if self.last_report_at is not None and now - self.last_report_at >= self.metrics_report_interval_seconds:
-            self._log_metrics(final=False)
-            self.last_report_at = now
-
-    def _metrics_for_load_step(self, message: dict[str, Any]) -> LatencyMetrics:
-        step = int(message.get("load_step", 0))
-        target_rps = int(message.get("target_rps", 0))
-        return self.metrics_by_load_step.setdefault((step, target_rps), LatencyMetrics())
+    def _report_metrics_if_window_complete(self) -> None:
+        if self.metrics.count >= self.metrics_window_size:
+            self._completed_metrics_windows += 1
+            if self._completed_metrics_windows % self.metrics_log_every_windows == 0:
+                self._log_metrics(final=False)
+            self.metrics = LatencyMetrics()
 
     def _log_metrics(self, *, final: bool) -> None:
         summary = self.metrics.summary()
         if summary["count"]:
             logger.info(
-                "%s latency metrics | samples=%s | p50_ms=%.3f | p75_ms=%.3f | p95_ms=%.3f | p99_ms=%.3f",
+                "%s latency metrics | latency_window=%s | samples=%s | received_total=%s | "
+                "measurement_received_total=%s | p50_ms=%.3f | p75_ms=%.3f | "
+                "p95_ms=%.3f | p99_ms=%.3f",
                 "Final" if final else "",
-                summary["count"], summary["p50_ms"], summary["p75_ms"], summary["p95_ms"], summary["p99_ms"],
+                self._completed_metrics_windows,
+                summary["count"],
+                self.received_messages_total,
+                self.measurement_messages_total,
+                summary["p50_ms"],
+                summary["p75_ms"],
+                summary["p95_ms"],
+                summary["p99_ms"],
             )
-            for (step, target_rps), step_metrics in sorted(self.metrics_by_load_step.items()):
-                step_summary = step_metrics.summary()
-                logger.info(
-                    "%s latency metrics | load_step=%s | target_rps=%s | samples=%s | "
-                    "p50_ms=%.3f | p75_ms=%.3f | p95_ms=%.3f | p99_ms=%.3f",
-                    "Final" if final else "",
-                    step,
-                    target_rps,
-                    step_summary["count"],
-                    step_summary["p50_ms"],
-                    step_summary["p75_ms"],
-                    step_summary["p95_ms"],
-                    step_summary["p99_ms"],
-                )
-
     async def close(self) -> None:
         if self.nc is not None:
             await self.nc.drain()
@@ -232,12 +240,16 @@ async def main() -> None:
     parser.add_argument("--consumer-name", required=True)
     parser.add_argument("--consumer-mode", choices=("pull", "push"), required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
-    parser.add_argument("--metrics-report-interval-seconds", type=float, default=5)
+    parser.add_argument("--metrics-window-size", type=int, default=100)
+    parser.add_argument("--latency-sample-every", type=int, default=10)
+    parser.add_argument("--metrics-log-every-windows", type=int, default=10)
     args = parser.parse_args()
     consumer = NatsConsumer(
         args.broker_host, args.broker_port, args.consumer_name,
-        args.consumer_mode, args.interaction_mode, args.metrics_report_interval_seconds,
+        args.consumer_mode, args.interaction_mode, args.metrics_window_size,
+        args.latency_sample_every, args.metrics_log_every_windows,
     )
+    start_metrics_server()
     try:
         await consumer.connect()
         await consumer.consume()

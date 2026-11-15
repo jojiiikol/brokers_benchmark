@@ -32,6 +32,7 @@ from src.scenario_service.creator.producer.nats_producer_creator import (
 )
 from src.scenario_service.dto.broker_config import BrokerConfig, Brokers
 from src.scenario_service.dto.consumer_config import ConsumerConfig
+from src.scenario_service.dto.interaction_mode import InteractionMode
 from src.scenario_service.dto.producer_config import ProducerConfig, LoadType, GuaranteeType
 from src.scenario_service.dto.scenario_config import ScenarioConfig
 
@@ -106,15 +107,6 @@ class ScenarioService:
             config: ScenarioConfig,
     ) -> tuple[BaseBrokerCreator, BaseProducerCreator, BaseConsumerCreator]:
         broker_type = config.broker_config.broker_type
-        component_brokers = {
-            config.producer_config.broker_connection.broker_type,
-            config.consumer_config.broker_connection.broker_type,
-        }
-        if component_brokers != {broker_type}:
-            raise ValueError(
-                "The broker type in producer and consumer connections must "
-                "match the scenario broker type"
-            )
         try:
             return (
                 self.broker_creators[broker_type],
@@ -155,44 +147,54 @@ class ScenarioService:
                 scenario.config.broker_config.broker_type.value,
                 scenario_id,
             )
+            broker_kwargs = {}
+            if (
+                scenario.config.broker_config.broker_type is Brokers.KAFKA
+                and scenario.config.interaction_mode is InteractionMode.WORK_QUEUE
+            ):
+                broker_kwargs["topic_partitions"] = scenario.config.consumer_config.count
             broker_container = await broker_creator.configurate(
                 scenario_id=scenario_id,
                 config=scenario.config.broker_config,
+                **broker_kwargs,
             )
             scenario.containers.append(broker_container)
             scenario.container_ids_by_role["broker"].append(broker_container)
             broker_hostname = broker_creator.broker_hostname(scenario_id)
 
-            producer_config = dataclasses.replace(
-                scenario.config.producer_config,
-                docker_args=[*scenario.config.producer_config.docker_args,
+            producer_args = [
                 "--broker-host", broker_hostname,
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 "--warmup-seconds", str(scenario.config.warmup_seconds),
                 "--duration-seconds", str(scenario.config.duration_seconds),
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
-                ],
-            )
+            ]
 
             producer_containers = await producer_creator.configurate(
                 scenario_id=scenario_id,
-                config=producer_config,
+                config=scenario.config.producer_config,
+                broker_type=scenario.config.broker_config.broker_type,
+                docker_args=producer_args,
             )
             scenario.containers.extend(producer_containers)
             scenario.container_ids_by_role["producer"].extend(producer_containers)
 
-            consumer_config = dataclasses.replace(
-                scenario.config.consumer_config,
-                docker_args=[*scenario.config.consumer_config.docker_args,
+            consumer_args = [
                 "--broker-host", broker_hostname,
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
-                ],
-            )
+                *(
+                    ("--guarantee-type", scenario.config.producer_config.guarantee_type.value)
+                    if scenario.config.broker_config.broker_type is Brokers.RABBITMQ
+                    else ()
+                ),
+            ]
 
             consumer_containers = await consumer_creator.configurate(
                 scenario_id=scenario_id,
-                config=consumer_config,
+                config=scenario.config.consumer_config,
+                broker_type=scenario.config.broker_config.broker_type,
+                docker_args=consumer_args,
                 interaction_mode=scenario.config.interaction_mode,
             )
             scenario.containers.extend(consumer_containers)
@@ -203,6 +205,14 @@ class ScenarioService:
                 await network.connect({"Container": producer_container})
             for consumer_container in consumer_containers:
                 await network.connect({"Container": consumer_container})
+
+            # Prometheus and Grafana are permanent Compose services. Only
+            # workload components join their shared network; brokers stay
+            # isolated in a scenario network.
+            for component_container in (*producer_containers, *consumer_containers):
+                await self.docker_service.connect_to_observability_network(
+                    component_container
+                )
 
             if not await self._validate_scenario(scenario):
                 raise ValueError("Component in scenario not built")
@@ -325,37 +335,6 @@ class ScenarioService:
         for container_id in scenario.container_ids_by_role[role]:
             if not await self.docker_service.start_container(container_id):
                 raise RuntimeError(f"Failed to start {role} container {container_id}")
-
-
-
-
-async def main():
-    service = ScenarioService()
-    scenario = await service.create_scenario(
-        scenario_config=ScenarioConfig(
-            broker_config=BrokerConfig(
-                broker_type=Brokers.RABBITMQ
-            ),
-            consumer_config=ConsumerConfig(
-                count=2,
-                docker_args=[]
-            ),
-            producer_config=ProducerConfig(
-                load_type=LoadType.CONSTANT,
-                payload_size=1024,
-                rps=2,
-                guarantee_type=GuaranteeType.AT_MOST_ONCE,
-                count=1,
-                docker_args=["--rps", "5"]
-            )
-        )
-    )
-    print(scenario)
-
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 
 

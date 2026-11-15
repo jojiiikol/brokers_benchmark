@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 from aiodocker.containers import DockerContainer
 from aiodocker.networks import DockerNetwork
 
-from src.config import CONTAINERS_NAMESPACE
+from src.config import CONTAINERS_NAMESPACE, OBSERVABILITY_NETWORK
 from src.docker_configurator import ContainerConfig, build_docker_payload
 import aiodocker
 
@@ -78,6 +78,16 @@ class SdkDockerService:
         except Exception:
             logger.exception("Failed to create container %s", container_config.name)
             return None
+
+    async def connect_to_observability_network(self, container_id: str) -> None:
+        """Attach a dynamic benchmark component to Compose's shared network."""
+        network = await self.client.networks.get(OBSERVABILITY_NETWORK)
+        await network.connect({"Container": container_id})
+        logger.info(
+            "Connected container %s to observability network %s",
+            container_id,
+            OBSERVABILITY_NETWORK,
+        )
 
     async def start_container(
             self,
@@ -228,6 +238,60 @@ class SdkDockerService:
                 logger.info("Network %s deleted", network_id)
             except Exception:
                 logger.exception("Failed to delete network %s", network_id)
+
+    async def get_benchmark_container_stats(self) -> list[dict]:
+        """Read resource counters for running benchmark containers via Docker API."""
+        containers = await self._get_resources_by_labels(
+            resource_collection=self.client.containers,
+            labels={"namespace": CONTAINERS_NAMESPACE},
+        )
+        result = []
+        for container in containers:
+            try:
+                details = await container.show()
+                labels = details.get("Config", {}).get("Labels", {}) or {}
+                scenario_id = labels.get("scenario_id")
+                component = labels.get("component")
+                if not scenario_id or not component:
+                    continue
+
+                stats = await container.stats(stream=False)
+                # aiodocker returns a one-item list for a non-streaming stats
+                # request; the Docker API payload itself is that first item.
+                if isinstance(stats, list):
+                    stats = stats[0] if stats else {}
+                networks = stats.get("networks", {}) or {}
+                network_received = sum(
+                    interface.get("rx_bytes", 0) for interface in networks.values()
+                )
+                network_transmitted = sum(
+                    interface.get("tx_bytes", 0) for interface in networks.values()
+                )
+                disk_written = sum(
+                    item.get("value", 0)
+                    for item in (
+                        stats.get("blkio_stats", {}).get(
+                            "io_service_bytes_recursive"
+                        )
+                        or []
+                    )
+                    if item.get("op") == "Write"
+                )
+                result.append({
+                    "scenario_id": scenario_id,
+                    "component": component,
+                    "container_name": details.get("Name", container.id).lstrip("/"),
+                    "cpu_seconds": stats.get("cpu_stats", {}).get(
+                        "cpu_usage", {}
+                    ).get("total_usage", 0) / 1_000_000_000,
+                    "memory_bytes": stats.get("memory_stats", {}).get("usage", 0),
+                    "network_received_bytes": network_received,
+                    "network_transmitted_bytes": network_transmitted,
+                    "disk_written_bytes": disk_written,
+                })
+            except Exception:
+                logger.exception("Failed to collect stats for container %s", container.id)
+        return result
 
     def _create_build_context(self, context_path: pathlib.Path) -> io.BytesIO:
         archive = io.BytesIO()

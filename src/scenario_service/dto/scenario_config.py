@@ -2,7 +2,11 @@ import dataclasses
 import enum
 import math
 
-from src.scenario_service.dto.broker_config import BrokerConfig
+from src.scenario_service.dto.broker_config import (
+    BrokerConfig,
+    Brokers,
+    MAX_KAFKA_WORK_QUEUE_PARTITIONS,
+)
 from src.scenario_service.dto.consumer_config import ConsumerConfig
 from src.scenario_service.dto.producer_config import ProducerConfig
 from src.scenario_service.dto.producer_config import LoadType
@@ -23,6 +27,16 @@ class ScenarioConfig:
             raise ValueError("warmup_seconds must be greater than or equal to zero")
         if self.duration_seconds <= 0:
             raise ValueError("duration_seconds must be greater than zero")
+        if (
+            self.broker_config.broker_type is Brokers.KAFKA
+            and self.interaction_mode is InteractionMode.WORK_QUEUE
+            and self.consumer_config.count > MAX_KAFKA_WORK_QUEUE_PARTITIONS
+        ):
+            raise ValueError(
+                "Kafka work_queue supports at most "
+                f"{MAX_KAFKA_WORK_QUEUE_PARTITIONS} consumers because each "
+                "consumer requires one partition"
+            )
         producer = self.producer_config
         if producer.load_type is LoadType.LINEAR:
             step = producer.step_duration_seconds

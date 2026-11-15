@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import json
 import logging
 import time
 
@@ -8,11 +7,16 @@ from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
 from src.components.common.load_profile import (
     LoadScheduler,
-    LoadStep,
     add_load_profile_arguments,
     publish_with_profile,
     scheduler_from_arguments,
 )
+from src.components.common.producer_metrics import ProducerMetrics
+from src.components.common.prometheus_metrics import (
+    ProducerPrometheusMetrics,
+    start_metrics_server,
+)
+from src.components.common.message_payload import build_message
 from src.logger.config import setup_logging
 
 
@@ -34,6 +38,7 @@ class KafkaProducer:
             load_scheduler: LoadScheduler | None = None,
             guarantee_type: str = "at_most_once",
             max_in_flight: int = 100,
+            metrics_report_interval_seconds: float = 5,
     ) -> None:
         if rps <= 0:
             raise ValueError("rps must be greater than zero")
@@ -53,6 +58,11 @@ class KafkaProducer:
         self.interaction_mode = interaction_mode
         self.guarantee_type = guarantee_type
         self.max_in_flight = max_in_flight
+        self.metrics = ProducerMetrics(
+            logger,
+            metrics_report_interval_seconds,
+            sink=ProducerPrometheusMetrics("kafka"),
+        )
         self._producer: AIOKafkaProducer | None = None
 
     async def connect(self) -> None:
@@ -80,13 +90,12 @@ class KafkaProducer:
                 await asyncio.sleep(2)
         raise RuntimeError("Could not connect to Kafka")
 
-    async def publish(self, phase: str, load_step: LoadStep | None = None) -> None:
+    async def publish(self, phase: str) -> None:
         if self._producer is None:
             raise RuntimeError("Producer is not connected")
         body = self._create_payload(
             phase=phase,
             sent_at=time.monotonic_ns(),
-            load_step=load_step,
         )
         # send() only queues the record for transmission. With acks=0 we do
         # not wait for a broker acknowledgement, so a lost record is not
@@ -102,18 +111,25 @@ class KafkaProducer:
             duration_seconds,
             self.load_scheduler.load_type.value,
         )
-        await publish_with_profile(
-            scheduler=self.load_scheduler,
-            duration_seconds=duration_seconds,
-            publish=lambda step: self.publish(phase, step),
-            on_step=lambda step: logger.info(
-                "Kafka %s load step=%s target_rps=%s",
-                phase,
-                step.index,
-                step.target_rps,
-            ),
-            max_in_flight=self.max_in_flight,
-        )
+        self.metrics.begin_phase(phase)
+        try:
+            await publish_with_profile(
+                scheduler=self.load_scheduler,
+                duration_seconds=duration_seconds,
+                publish=lambda step: self.metrics.track(
+                    self.payload_size * 1024,
+                    lambda: self.publish(phase),
+                ),
+                on_step=lambda step: logger.info(
+                    "Kafka %s target_rps=%s",
+                    phase,
+                    step.target_rps,
+                ),
+                max_in_flight=self.max_in_flight,
+                on_in_flight_changed=self.metrics.set_in_flight,
+            )
+        finally:
+            self.metrics.log_final()
         logger.info("Finished Kafka %s phase", phase)
 
     async def run_benchmark(
@@ -128,29 +144,14 @@ class KafkaProducer:
             self,
             phase: str,
             sent_at: int,
-            load_step: LoadStep | None = None,
     ) -> bytes:
-        """Build a JSON message whose full UTF-8 body has the requested size."""
+        """Build a binary message whose full body has the requested size."""
         target_size = self.payload_size * 1024
-        payload = {
-            "data": "",
-            "phase": phase,
-            "sent_at": sent_at,
-            "load_step": load_step.index if load_step else 0,
-            "target_rps": load_step.target_rps if load_step else self.rps,
-        }
-        empty_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        data_size = target_size - len(empty_body)
-        if data_size < 0:
-            raise ValueError(
-                f"payload_size={self.payload_size} KiB is too small: "
-                f"message metadata requires {len(empty_body)} bytes"
-            )
-        payload["data"] = "a" * data_size
-        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        if len(body) != target_size:
-            raise RuntimeError(f"Expected {target_size}-byte message, got {len(body)}")
-        return body
+        return build_message(
+            size_bytes=target_size,
+            phase=phase,
+            sent_at=sent_at,
+        )
 
     async def close(self) -> None:
         if self._producer is not None:
@@ -170,6 +171,7 @@ async def main() -> None:
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once",), default="at_most_once")
+    parser.add_argument("--metrics-report-interval-seconds", type=float, default=5)
     args = parser.parse_args()
     if args.warmup_seconds < 0:
         parser.error("--warmup-seconds must be greater than or equal to zero")
@@ -190,7 +192,9 @@ async def main() -> None:
         load_scheduler=scheduler,
         guarantee_type=args.guarantee_type,
         max_in_flight=args.max_in_flight,
+        metrics_report_interval_seconds=args.metrics_report_interval_seconds,
     )
+    start_metrics_server()
     try:
         await producer.connect()
         await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
