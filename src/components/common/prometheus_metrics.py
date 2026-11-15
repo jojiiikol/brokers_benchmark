@@ -34,6 +34,16 @@ _CONSUMER_LATENCY = Histogram(
     ("broker",),
     buckets=(0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300),
 )
+_CONSUMER_LATENCY_MIN = Gauge(
+    "benchmark_consumer_latency_seconds_min",
+    "Minimum sampled end-to-end latency in the consumer process.",
+    ("broker",),
+)
+_CONSUMER_LATENCY_MAX = Gauge(
+    "benchmark_consumer_latency_seconds_max",
+    "Maximum sampled end-to-end latency in the consumer process.",
+    ("broker",),
+)
 
 
 def start_metrics_server(port: int = 8000) -> None:
@@ -76,9 +86,25 @@ class ConsumerPrometheusMetrics:
             for phase in ("warmup", "measurement")
         }
         self._latency = _CONSUMER_LATENCY.labels(broker=broker)
+        self._latency_min = _CONSUMER_LATENCY_MIN.labels(broker=broker)
+        self._latency_max = _CONSUMER_LATENCY_MAX.labels(broker=broker)
+        self._minimum_latency: float | None = None
+        self._maximum_latency: float | None = None
 
     def received(self, phase: str) -> None:
         self._received[phase].inc()
 
     def observe_latency_seconds(self, latency_seconds: float) -> None:
         self._latency.observe(latency_seconds)
+        self._minimum_latency = (
+            latency_seconds
+            if self._minimum_latency is None
+            else min(self._minimum_latency, latency_seconds)
+        )
+        self._maximum_latency = (
+            latency_seconds
+            if self._maximum_latency is None
+            else max(self._maximum_latency, latency_seconds)
+        )
+        self._latency_min.set(self._minimum_latency)
+        self._latency_max.set(self._maximum_latency)

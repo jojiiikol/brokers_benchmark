@@ -35,6 +35,7 @@ from src.scenario_service.dto.consumer_config import ConsumerConfig
 from src.scenario_service.dto.interaction_mode import InteractionMode
 from src.scenario_service.dto.producer_config import ProducerConfig, LoadType, GuaranteeType
 from src.scenario_service.dto.scenario_config import ScenarioConfig
+from src.results.service import ScenarioResultService
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class Scenario:
     )
     started_at: datetime.datetime | None = None
     warmup_finished_at: datetime.datetime | None = None
+    result_path: str | None = None
     error: str | None = None
     container_ids_by_role: dict[str, list[str]] = dataclasses.field(
         default_factory=lambda: {"broker": [], "consumer": [], "producer": []}
@@ -74,14 +76,21 @@ class Scenario:
 class ScenarioService:
     MAX_RUNNING_SCENARIO_COUNT: int = 5
     TIMEOUT_SCENARIO_SECONDS: int = 45
+    RESULTS_SCRAPE_GRACE_SECONDS: int = 6
 
     def __init__(
             self,
             # configurator: ComponentConfigurator,
             docker_service: SdkDockerService | None = None,
+            result_service: ScenarioResultService | None = None,
+            results_scrape_grace_seconds: float = RESULTS_SCRAPE_GRACE_SECONDS,
 
     ):
         self.docker_service = docker_service or SdkDockerService()
+        self.result_service = result_service or ScenarioResultService()
+        if results_scrape_grace_seconds < 0:
+            raise ValueError("results_scrape_grace_seconds must be non-negative")
+        self.results_scrape_grace_seconds = results_scrape_grace_seconds
         # self.configurator = ComponentConfigurator(docker_service)
         self.producer_creators: dict[Brokers, BaseProducerCreator] = {
             Brokers.RABBITMQ: RabbitMQProducerCreator(self.docker_service),
@@ -167,6 +176,8 @@ class ScenarioService:
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 "--warmup-seconds", str(scenario.config.warmup_seconds),
                 "--duration-seconds", str(scenario.config.duration_seconds),
+                "--result-retention-seconds",
+                str(self.results_scrape_grace_seconds),
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
             ]
 
@@ -313,28 +324,45 @@ class ScenarioService:
             await asyncio.sleep(scenario.config.duration_seconds)
 
             scenario.status = ScenarioStatus.STOPPING
+            await asyncio.sleep(self.results_scrape_grace_seconds)
+            scenario.finished_at = datetime.datetime.now(datetime.UTC)
+            await self._save_result(scenario, final_status=ScenarioStatus.FINISHED)
             await self.docker_service.clear_scenario_resources(scenario.id)
             scenario.status = ScenarioStatus.FINISHED
-            scenario.finished_at = datetime.datetime.now(datetime.UTC)
             return scenario.id
         except asyncio.CancelledError:
             scenario.status = ScenarioStatus.STOPPING
+            scenario.finished_at = datetime.datetime.now(datetime.UTC)
+            await self._save_result(scenario, final_status=ScenarioStatus.ERROR)
             await self.docker_service.clear_scenario_resources(scenario.id)
             scenario.status = ScenarioStatus.ERROR
             scenario.error = "Scenario task was cancelled"
-            scenario.finished_at = datetime.datetime.now(datetime.UTC)
             raise
         except Exception as e:
             logger.exception("Scenario %s failed", scenario.id)
             scenario.status = ScenarioStatus.ERROR
             scenario.error = str(e)
-            await self.docker_service.clear_scenario_resources(scenario.id)
             scenario.finished_at = datetime.datetime.now(datetime.UTC)
+            await self._save_result(scenario, final_status=ScenarioStatus.ERROR)
+            await self.docker_service.clear_scenario_resources(scenario.id)
 
     async def _start_role(self, scenario: Scenario, role: str) -> None:
         for container_id in scenario.container_ids_by_role[role]:
             if not await self.docker_service.start_container(container_id):
                 raise RuntimeError(f"Failed to start {role} container {container_id}")
+
+    async def _save_result(
+            self,
+            scenario: Scenario,
+            final_status: ScenarioStatus,
+    ) -> None:
+        try:
+            path = await self.result_service.save(scenario, final_status.value)
+            scenario.result_path = str(path)
+        except Exception:
+            # A failed report must not prevent resource cleanup or alter the
+            # experiment status.
+            logger.exception("Failed to save result for scenario %s", scenario.id)
 
 
 

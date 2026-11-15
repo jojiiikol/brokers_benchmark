@@ -159,9 +159,12 @@ async def main() -> None:
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once",), default="at_most_once")
     parser.add_argument("--metrics-report-interval-seconds", type=float, default=5)
+    parser.add_argument("--result-retention-seconds", type=float, default=0)
     args = parser.parse_args()
     if args.warmup_seconds < 0 or args.duration_seconds <= 0:
         parser.error("Invalid benchmark durations")
+    if args.result_retention_seconds < 0:
+        parser.error("--result-retention-seconds must be greater than or equal to zero")
     try:
         scheduler = scheduler_from_arguments(args, args.duration_seconds)
     except ValueError as error:
@@ -180,6 +183,7 @@ async def main() -> None:
     try:
         await producer.connect()
         await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
+        await asyncio.sleep(args.result_retention_seconds)
     finally:
         await producer.close()
 
