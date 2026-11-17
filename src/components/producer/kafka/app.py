@@ -11,7 +11,7 @@ from src.components.common.load_profile import (
     publish_with_profile,
     scheduler_from_arguments,
 )
-from src.components.common.producer_metrics import ProducerMetrics
+from src.components.common.producer_metrics import ProducerMetrics, wait_for_result_collection
 from src.components.common.prometheus_metrics import (
     ProducerPrometheusMetrics,
     start_metrics_server,
@@ -32,21 +32,22 @@ class KafkaProducer:
             self,
             broker_host: str,
             broker_port: str = "9092",
-            rps: int = 1,
+            rps: int | None = 1,
             payload_size: int = 1,
             interaction_mode: str = "work_queue",
             load_scheduler: LoadScheduler | None = None,
             guarantee_type: str = "at_most_once",
+            producer_id: int = 1,
             max_in_flight: int = 100,
             metrics_report_interval_seconds: float = 5,
     ) -> None:
-        if rps <= 0:
+        if rps is not None and rps <= 0:
             raise ValueError("rps must be greater than zero")
         if payload_size <= 0:
             raise ValueError("payload_size must be greater than zero")
         if interaction_mode not in ("work_queue", "pub_sub"):
             raise ValueError(f"Unsupported interaction mode: {interaction_mode}")
-        if guarantee_type != "at_most_once":
+        if guarantee_type not in ("at_most_once", "at_least_once"):
             raise ValueError(f"Unsupported producer guarantee: {guarantee_type}")
         if max_in_flight <= 0:
             raise ValueError("max_in_flight must be greater than zero")
@@ -57,6 +58,8 @@ class KafkaProducer:
         self.payload_size = payload_size
         self.interaction_mode = interaction_mode
         self.guarantee_type = guarantee_type
+        self.producer_id = producer_id
+        self._sequence = 0
         self.max_in_flight = max_in_flight
         self.metrics = ProducerMetrics(
             logger,
@@ -71,16 +74,20 @@ class KafkaProducer:
 
         attempts = 12
         while attempts > 0:
+            reliable = self.guarantee_type == "at_least_once"
             producer = AIOKafkaProducer(
                 bootstrap_servers=self.bootstrap_servers,
-                acks=0,
+                acks="all" if reliable else 0,
+                enable_idempotence=reliable,
+                max_request_size=2 * 1024 * 1024,
             )
             try:
                 await producer.start()
                 self._producer = producer
                 logger.info(
-                    "Connected to Kafka at %s with acks=0",
+                    "Connected to Kafka at %s with acks=%s",
                     self.bootstrap_servers,
+                    "all" if reliable else "0",
                 )
                 return
             except KafkaConnectionError:
@@ -97,10 +104,10 @@ class KafkaProducer:
             phase=phase,
             sent_at=time.monotonic_ns(),
         )
-        # send() only queues the record for transmission. With acks=0 we do
-        # not wait for a broker acknowledgement, so a lost record is not
-        # retried by this benchmark producer.
-        await self._producer.send(TOPIC_NAME, body)
+        if self.guarantee_type == "at_least_once":
+            await self._producer.send_and_wait(TOPIC_NAME, body)
+        else:
+            await self._producer.send(TOPIC_NAME, body)
 
     async def publish_for(self, duration_seconds: float, phase: str) -> None:
         if self.load_scheduler is None:
@@ -147,10 +154,12 @@ class KafkaProducer:
     ) -> bytes:
         """Build a binary message whose full body has the requested size."""
         target_size = self.payload_size * 1024
+        self._sequence += 1
         return build_message(
             size_bytes=target_size,
             phase=phase,
             sent_at=sent_at,
+            message_id=(self.producer_id << 48) | self._sequence,
         )
 
     async def close(self) -> None:
@@ -170,9 +179,11 @@ async def main() -> None:
     parser.add_argument("--warmup-seconds", type=float, default=0)
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
-    parser.add_argument("--guarantee-type", choices=("at_most_once",), default="at_most_once")
+    parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
     parser.add_argument("--metrics-report-interval-seconds", type=float, default=5)
+    parser.add_argument("--producer-id", type=int, default=1)
     parser.add_argument("--result-retention-seconds", type=float, default=0)
+    parser.add_argument("--completion-file")
     args = parser.parse_args()
     if args.warmup_seconds < 0:
         parser.error("--warmup-seconds must be greater than or equal to zero")
@@ -194,6 +205,7 @@ async def main() -> None:
         interaction_mode=args.interaction_mode,
         load_scheduler=scheduler,
         guarantee_type=args.guarantee_type,
+        producer_id=args.producer_id,
         max_in_flight=args.max_in_flight,
         metrics_report_interval_seconds=args.metrics_report_interval_seconds,
     )
@@ -201,9 +213,9 @@ async def main() -> None:
     try:
         await producer.connect()
         await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
-        await asyncio.sleep(args.result_retention_seconds)
     finally:
         await producer.close()
+    await wait_for_result_collection(args.completion_file, args.result_retention_seconds)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from src.components.common.load_profile import (
     publish_with_profile,
     scheduler_from_arguments,
 )
-from src.components.common.producer_metrics import ProducerMetrics
+from src.components.common.producer_metrics import ProducerMetrics, wait_for_result_collection
 from src.components.common.prometheus_metrics import (
     ProducerPrometheusMetrics,
     start_metrics_server,
@@ -33,16 +33,17 @@ class NatsProducer:
             self,
             broker_host: str,
             broker_port: str,
-            rps: int,
+            rps: int | None,
             payload_size: int,
             load_scheduler: LoadScheduler,
             guarantee_type: str = "at_most_once",
+            producer_id: int = 1,
             max_in_flight: int = 100,
             metrics_report_interval_seconds: float = 5,
     ) -> None:
-        if rps <= 0 or payload_size <= 0:
+        if (rps is not None and rps <= 0) or payload_size <= 0:
             raise ValueError("rps and payload_size must be greater than zero")
-        if guarantee_type != "at_most_once":
+        if guarantee_type not in ("at_most_once", "at_least_once"):
             raise ValueError(f"Unsupported producer guarantee: {guarantee_type}")
         if max_in_flight <= 0:
             raise ValueError("max_in_flight must be greater than zero")
@@ -51,6 +52,8 @@ class NatsProducer:
         self.payload_size = payload_size
         self.load_scheduler = load_scheduler
         self.guarantee_type = guarantee_type
+        self.producer_id = producer_id
+        self._sequence = 0
         self.max_in_flight = max_in_flight
         self.metrics = ProducerMetrics(
             logger,
@@ -87,7 +90,11 @@ class NatsProducer:
             await self.js.add_stream(config=StreamConfig(
                 name=STREAM_NAME,
                 subjects=[SUBJECT],
-                storage=StorageType.MEMORY,
+                storage=(
+                    StorageType.FILE
+                    if self.guarantee_type == "at_least_once"
+                    else StorageType.MEMORY
+                ),
                 retention=RetentionPolicy.INTEREST,
             ))
             logger.info("Created NATS stream %s with interest retention", STREAM_NAME)
@@ -97,9 +104,11 @@ class NatsProducer:
 
     async def publish(self, phase: str) -> None:
         body = self._create_payload(phase, time.monotonic_ns())
-        # The stream still receives this subject, but Core NATS publish does
-        # not wait for JetStream's PubAck. This is producer-side at-most-once.
-        await self.nc.publish(SUBJECT, body)
+        if self.guarantee_type == "at_least_once":
+            await self.js.publish(SUBJECT, body)
+        else:
+            # Core NATS publish does not wait for JetStream's PubAck.
+            await self.nc.publish(SUBJECT, body)
 
     async def publish_for(self, duration_seconds: float, phase: str) -> None:
         logger.info(
@@ -135,10 +144,12 @@ class NatsProducer:
 
     def _create_payload(self, phase: str, sent_at: int) -> bytes:
         target_size = self.payload_size * 1024
+        self._sequence += 1
         return build_message(
             size_bytes=target_size,
             phase=phase,
             sent_at=sent_at,
+            message_id=(self.producer_id << 48) | self._sequence,
         )
 
     async def close(self) -> None:
@@ -157,9 +168,11 @@ async def main() -> None:
     parser.add_argument("--warmup-seconds", type=float, default=0)
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
-    parser.add_argument("--guarantee-type", choices=("at_most_once",), default="at_most_once")
+    parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
     parser.add_argument("--metrics-report-interval-seconds", type=float, default=5)
+    parser.add_argument("--producer-id", type=int, default=1)
     parser.add_argument("--result-retention-seconds", type=float, default=0)
+    parser.add_argument("--completion-file")
     args = parser.parse_args()
     if args.warmup_seconds < 0 or args.duration_seconds <= 0:
         parser.error("Invalid benchmark durations")
@@ -176,6 +189,7 @@ async def main() -> None:
         args.payload_size,
         scheduler,
         args.guarantee_type,
+        args.producer_id,
         args.max_in_flight,
         args.metrics_report_interval_seconds,
     )
@@ -183,9 +197,9 @@ async def main() -> None:
     try:
         await producer.connect()
         await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
-        await asyncio.sleep(args.result_retention_seconds)
     finally:
         await producer.close()
+    await wait_for_result_collection(args.completion_file, args.result_retention_seconds)
 
 
 if __name__ == "__main__":

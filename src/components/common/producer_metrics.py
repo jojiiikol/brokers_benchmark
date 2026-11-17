@@ -5,7 +5,20 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
+
+
+async def wait_for_result_collection(
+        completion_file: str | None, retention_seconds: float
+) -> None:
+    if completion_file is None:
+        await asyncio.sleep(retention_seconds)
+        return
+
+    Path(completion_file).touch()
+    # The metrics endpoint must stay available until scenario cleanup.
+    await asyncio.Event().wait()
 
 
 class ProducerMetricsSink(Protocol):

@@ -40,6 +40,7 @@ class Orchestrator:
                     ScenarioStatus.STARTING,
                     ScenarioStatus.WARMING_UP,
                     ScenarioStatus.RUNNING,
+                    ScenarioStatus.DRAINING,
                     ScenarioStatus.STOPPING,
                 },
                 self.scenario_storage

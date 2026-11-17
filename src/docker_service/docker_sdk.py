@@ -7,6 +7,7 @@ import time
 from typing import AsyncGenerator
 
 from aiodocker.containers import DockerContainer
+from aiodocker.exceptions import DockerError
 from aiodocker.networks import DockerNetwork
 
 from src.config import CONTAINERS_NAMESPACE, OBSERVABILITY_NETWORK
@@ -385,6 +386,25 @@ class SdkDockerService:
             "running": state.get("Running"),
             "exit_code": state.get("ExitCode"),
         }
+
+    async def wait_for_container_file(self, container_id: str, path: str) -> None:
+        container = await self.client.containers.get(container_id)
+        while True:
+            state = await self.get_container_state(container)
+            if not state["running"]:
+                raise RuntimeError(
+                    f"Container {container_id} exited before writing {path} "
+                    f"(exit code {state['exit_code']})"
+                )
+            try:
+                archive = await container.get_archive(path)
+            except DockerError as error:
+                if error.status != 404:
+                    raise
+            else:
+                archive.close()
+                return
+            await asyncio.sleep(0.5)
 
     async def wait_container_ready(
             self,

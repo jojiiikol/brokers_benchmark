@@ -9,7 +9,7 @@ from aiokafka.errors import KafkaConnectionError
 from src.logger.config import setup_logging
 from src.components.common.message_payload import (
     InvalidBenchmarkMessage,
-    decode_message_fields,
+    decode_message_metadata,
 )
 from src.components.common.prometheus_metrics import (
     ConsumerPrometheusMetrics,
@@ -58,6 +58,7 @@ class KafkaConsumer:
             broker_host: str,
             broker_port: str,
             group_id: str,
+            guarantee_type: str = "at_most_once",
             metrics_window_size: int = 100,
             latency_sample_every: int = 10,
             metrics_log_every_windows: int = 10,
@@ -68,6 +69,9 @@ class KafkaConsumer:
             raise ValueError("latency sampling and logging intervals must be greater than zero")
         self.bootstrap_servers = f"{broker_host}:{broker_port}"
         self.group_id = group_id
+        if guarantee_type not in ("at_most_once", "at_least_once"):
+            raise ValueError(f"Unsupported delivery guarantee: {guarantee_type}")
+        self.guarantee_type = guarantee_type
         self.metrics_window_size = metrics_window_size
         self.latency_sample_every = latency_sample_every
         self.metrics_log_every_windows = metrics_log_every_windows
@@ -75,6 +79,7 @@ class KafkaConsumer:
         self.received_messages_total = 0
         self.measurement_messages_total = 0
         self._completed_metrics_windows = 0
+        self._seen_message_ids: set[int] = set()
         self.prometheus_metrics = ConsumerPrometheusMetrics("kafka")
         self._consumer: AIOKafkaConsumer | None = None
 
@@ -89,6 +94,8 @@ class KafkaConsumer:
                 bootstrap_servers=self.bootstrap_servers,
                 group_id=self.group_id,
                 auto_offset_reset="latest",
+                enable_auto_commit=self.guarantee_type == "at_most_once",
+                max_partition_fetch_bytes=2 * 1024 * 1024,
             )
             try:
                 await consumer.start()
@@ -113,12 +120,16 @@ class KafkaConsumer:
         try:
             async for message in self._consumer:
                 try:
-                    phase, sent_at = decode_message_fields(message.value)
+                    phase, sent_at, message_id = decode_message_metadata(message.value)
                 except InvalidBenchmarkMessage as error:
                     logger.warning("Received malformed benchmark message: %s", error)
                     continue
                 self.received_messages_total += 1
                 self.prometheus_metrics.received(phase)
+                if message_id in self._seen_message_ids:
+                    self.prometheus_metrics.duplicate(phase)
+                else:
+                    self._seen_message_ids.add(message_id)
                 if phase == "measurement":
                     self.measurement_messages_total += 1
                     if self.measurement_messages_total % self.latency_sample_every == 0:
@@ -126,6 +137,8 @@ class KafkaConsumer:
                         self.metrics.observe(latency_seconds * 1000)
                         self.prometheus_metrics.observe_latency_seconds(latency_seconds)
                         self._report_metrics_if_window_complete()
+                if self.guarantee_type == "at_least_once":
+                    await self._consumer.commit()
         finally:
             self._log_metrics(final=True)
 
@@ -171,12 +184,14 @@ async def main() -> None:
     parser.add_argument("--latency-sample-every", type=int, default=10)
     parser.add_argument("--metrics-log-every-windows", type=int, default=10)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
+    parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
     args = parser.parse_args()
 
     consumer = KafkaConsumer(
         broker_host=args.broker_host,
         broker_port=args.broker_port,
         group_id=args.group_id,
+        guarantee_type=args.guarantee_type,
         metrics_window_size=args.metrics_window_size,
         latency_sample_every=args.latency_sample_every,
         metrics_log_every_windows=args.metrics_log_every_windows,

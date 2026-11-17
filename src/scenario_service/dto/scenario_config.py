@@ -21,12 +21,15 @@ class ScenarioConfig:
     interaction_mode: InteractionMode = InteractionMode.WORK_QUEUE
     warmup_seconds: float = 0
     duration_seconds: float = 60
+    drain_seconds: float = 10
 
     def __post_init__(self) -> None:
         if self.warmup_seconds < 0:
             raise ValueError("warmup_seconds must be greater than or equal to zero")
         if self.duration_seconds <= 0:
             raise ValueError("duration_seconds must be greater than zero")
+        if not math.isfinite(self.drain_seconds) or self.drain_seconds < 0:
+            raise ValueError("drain_seconds must be finite and non-negative")
         if (
             self.broker_config.broker_type is Brokers.KAFKA
             and self.interaction_mode is InteractionMode.WORK_QUEUE

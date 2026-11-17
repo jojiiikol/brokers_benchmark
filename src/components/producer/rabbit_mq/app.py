@@ -14,7 +14,7 @@ from src.components.common.load_profile import (
     publish_with_profile,
     scheduler_from_arguments,
 )
-from src.components.common.producer_metrics import ProducerMetrics
+from src.components.common.producer_metrics import ProducerMetrics, wait_for_result_collection
 from src.components.common.prometheus_metrics import (
     ProducerPrometheusMetrics,
     start_metrics_server,
@@ -43,13 +43,14 @@ class Producer:
             interaction_mode: str = "work_queue",
             load_scheduler: LoadScheduler | None = None,
             guarantee_type: str = "at_most_once",
+            producer_id: int = 1,
             max_in_flight: int = 100,
             metrics_report_interval_seconds: float = 5,
 
     ):
         if interaction_mode not in ("work_queue", "pub_sub"):
             raise ValueError(f"Unsupported interaction mode: {interaction_mode}")
-        if guarantee_type != "at_most_once":
+        if guarantee_type not in ("at_most_once", "at_least_once"):
             raise ValueError(f"Unsupported producer guarantee: {guarantee_type}")
         if max_in_flight <= 0:
             raise ValueError("max_in_flight must be greater than zero")
@@ -67,11 +68,11 @@ class Producer:
         self.TPS = self.load_scheduler.step_at(0).target_rps
         self.MESSAGE_SIZE = message_size
 
-        self._interval = 1.0 / self.TPS
-
         self.queue_name = queue_name
         self.interaction_mode = interaction_mode
         self.guarantee_type = guarantee_type
+        self.producer_id = producer_id
+        self._sequence = 0
         self.max_in_flight = max_in_flight
         self.metrics = ProducerMetrics(
             logger,
@@ -88,10 +89,12 @@ class Producer:
         while attempts > 0:
             try:
                 self._connection = await aio_pika.connect_robust(self.CONNECTION_URL)
-                self._channel = await self._connection.channel(publisher_confirms=False)
+                confirms = self.guarantee_type == "at_least_once"
+                self._channel = await self._connection.channel(publisher_confirms=confirms)
                 logger.info(
-                    "Connected to RabbitMQ at %s with publisher confirms disabled",
+                    "Connected to RabbitMQ at %s with publisher_confirms=%s",
                     self.CONNECTION_URL,
+                    confirms,
                 )
                 return
             except AMQPConnectionError:
@@ -136,7 +139,9 @@ class Producer:
 
         message = aio_pika.Message(
             body=body,
-            delivery_mode=aio_pika.DeliveryMode.NOT_PERSISTENT,
+            delivery_mode=(aio_pika.DeliveryMode.PERSISTENT
+                           if self.guarantee_type == "at_least_once"
+                           else aio_pika.DeliveryMode.NOT_PERSISTENT),
             content_type="application/octet-stream",
         )
 
@@ -190,10 +195,12 @@ class Producer:
     ) -> bytes:
         """Build a binary message whose complete body has an exact size."""
         target_size = self.MESSAGE_SIZE * 1024
+        self._sequence += 1
         return build_message(
             size_bytes=target_size,
             phase=phase,
             sent_at=sent_at,
+            message_id=(self.producer_id << 48) | self._sequence,
         )
 
 
@@ -244,11 +251,13 @@ async def main():
         help="RabbitMQ delivery topology",
     )
     parser.add_argument(
-        "--guarantee-type", choices=("at_most_once",), default="at_most_once",
+        "--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once",
         help="Producer delivery guarantee",
     )
     parser.add_argument("--metrics-report-interval-seconds", type=float, default=5)
+    parser.add_argument("--producer-id", type=int, default=1)
     parser.add_argument("--result-retention-seconds", type=float, default=0)
+    parser.add_argument("--completion-file")
     args = parser.parse_args()
     if args.payload_size <= 0:
         parser.error("--payload_size must be greater than zero")
@@ -273,17 +282,21 @@ async def main():
         interaction_mode=args.interaction_mode,
         load_scheduler=scheduler,
         guarantee_type=args.guarantee_type,
+        producer_id=args.producer_id,
         max_in_flight=args.max_in_flight,
         metrics_report_interval_seconds=args.metrics_report_interval_seconds,
     )
     start_metrics_server()
-    await producer._connect()
-    await producer.declare_topology()
-    await producer.run_benchmark(
-        warmup_seconds=args.warmup_seconds,
-        duration_seconds=args.duration_seconds,
-    )
-    await asyncio.sleep(args.result_retention_seconds)
+    try:
+        await producer._connect()
+        await producer.declare_topology()
+        await producer.run_benchmark(
+            warmup_seconds=args.warmup_seconds,
+            duration_seconds=args.duration_seconds,
+        )
+    finally:
+        await producer.close()
+    await wait_for_result_collection(args.completion_file, args.result_retention_seconds)
 
 
 if __name__ == "__main__":

@@ -11,12 +11,13 @@ from dataclasses import dataclass
 class LoadType(str, enum.Enum):
     CONSTANT = "constant"
     LINEAR = "linear"
+    MAX_THROUGHPUT = "max_throughput"
 
 
 @dataclass(frozen=True)
 class LoadStep:
     index: int
-    target_rps: int
+    target_rps: int | None
 
 
 class LoadScheduler:
@@ -39,6 +40,13 @@ class LoadScheduler:
             raise ValueError("measurement duration must be greater than zero")
         self.load_type = load_type
         self.measurement_duration_seconds = measurement_duration_seconds
+
+        if load_type is LoadType.MAX_THROUGHPUT:
+            if any(value is not None for value in (rps, start_rps, end_rps, step_duration_seconds)):
+                raise ValueError("max_throughput load does not accept a target rps")
+            self._steps = (LoadStep(index=0, target_rps=None),)
+            self.step_duration_seconds = measurement_duration_seconds
+            return
 
         if load_type is LoadType.CONSTANT:
             if rps is None or rps <= 0:
@@ -84,7 +92,7 @@ class LoadScheduler:
         )
 
     def step_at(self, elapsed_seconds: float) -> LoadStep:
-        if self.load_type is LoadType.CONSTANT:
+        if len(self._steps) == 1:
             return self._steps[0]
         index = min(
             max(int(elapsed_seconds / self.step_duration_seconds), 0),
@@ -120,6 +128,15 @@ def scheduler_from_arguments(
         measurement_duration_seconds: float,
 ) -> LoadScheduler:
     load_type = LoadType(args.load_type)
+    if load_type is LoadType.MAX_THROUGHPUT:
+        return LoadScheduler(
+            load_type,
+            measurement_duration_seconds,
+            rps=args.rps,
+            start_rps=args.start_rps,
+            end_rps=args.end_rps,
+            step_duration_seconds=args.step_duration_seconds,
+        )
     if load_type is LoadType.CONSTANT:
         return LoadScheduler(
             load_type=load_type,
@@ -159,44 +176,65 @@ async def publish_with_profile(
     next_publish_at = started_at
     current_step_index: int | None = None
 
-    in_flight: set[asyncio.Task[None]] = set()
-    try:
-        while True:
-            now = loop.time()
-            if now >= deadline:
-                return
+    if duration_seconds <= 0:
+        return
+
+    active = 0
+    capacity = asyncio.Event()
+
+    def update_active(delta: int) -> None:
+        nonlocal active
+        active += delta
+        if on_in_flight_changed is not None:
+            on_in_flight_changed(active)
+
+    def on_completed(_task: asyncio.Task[None]) -> None:
+        was_full = active == max_in_flight
+        update_active(-1)
+        if was_full:
+            capacity.set()
+
+    async def publish_repeatedly(step: LoadStep) -> None:
+        while loop.time() < deadline:
+            # Some clients can accept a publication without suspending. Yield
+            # periodically so their I/O tasks and other workers can run.
+            for _ in range(32):
+                if loop.time() >= deadline:
+                    return
+                update_active(1)
+                try:
+                    await publish(step)
+                finally:
+                    update_active(-1)
+            await asyncio.sleep(0)
+
+    async with asyncio.TaskGroup() as tasks:
+        if scheduler.load_type is LoadType.MAX_THROUGHPUT:
+            step = scheduler.step_at(0)
+            on_step(step)
+            for _ in range(max_in_flight):
+                tasks.create_task(publish_repeatedly(step))
+            return
+
+        while (now := loop.time()) < deadline:
+            if active >= max_in_flight:
+                capacity.clear()
+                await capacity.wait()
+                continue
 
             step = scheduler.step_at(now - started_at)
             if step.index != current_step_index:
                 current_step_index = step.index
                 next_publish_at = now
                 on_step(step)
+            assert step.target_rps is not None
 
             delay = next_publish_at - now
             if delay > 0:
                 await asyncio.sleep(min(delay, deadline - now))
                 continue
 
-            in_flight.add(asyncio.create_task(publish(step)))
-            if on_in_flight_changed is not None:
-                on_in_flight_changed(len(in_flight))
+            update_active(1)
+            task = tasks.create_task(publish(step))
+            task.add_done_callback(on_completed)
             next_publish_at = max(next_publish_at + 1 / step.target_rps, loop.time())
-
-            if len(in_flight) >= max_in_flight:
-                completed, _ = await asyncio.wait(
-                    in_flight,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                in_flight.difference_update(completed)
-                if on_in_flight_changed is not None:
-                    on_in_flight_changed(len(in_flight))
-                # Propagate a publish error instead of silently treating a
-                # failed local hand-off as a sent message.
-                await asyncio.gather(*completed)
-    finally:
-        try:
-            if in_flight:
-                await asyncio.gather(*in_flight)
-        finally:
-            if on_in_flight_changed is not None:
-                on_in_flight_changed(0)

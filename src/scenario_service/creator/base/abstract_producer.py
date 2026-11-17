@@ -19,6 +19,8 @@ class BaseProducerCreator(BaseServiceCreator):
     ):
         launch_args = [
             *docker_args,
+            "--producer-id",
+            str((instance_index or 0) + 1),
             "--load-type",
             config.load_type.value,
             "--guarantee-type",
@@ -39,7 +41,7 @@ class BaseProducerCreator(BaseServiceCreator):
                     str(config.step_duration_seconds),
                 )
             )
-        else:
+        elif config.load_type is not LoadType.MAX_THROUGHPUT:
             raise ValueError(f"Unsupported load type {config.load_type.value}")
         launch_args.extend(("--payload_size", str(config.payload_size)))
         return await super().configurate(

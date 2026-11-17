@@ -55,6 +55,7 @@ class KafkaCreator(BaseBrokerCreator):
                     "KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS": "0",
                     "KAFKA_NUM_PARTITIONS": str(partitions),
                     "KAFKA_AUTO_CREATE_TOPICS_ENABLE": "true",
+                    "KAFKA_MESSAGE_MAX_BYTES": str(2 * 1024 * 1024),
                 },
                 resources=ResourceLimits(
                     memory=1 * 1024 * 1024 * 1024,

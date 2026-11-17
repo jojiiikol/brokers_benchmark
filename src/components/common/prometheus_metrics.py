@@ -28,6 +28,11 @@ _CONSUMER_RECEIVED = Counter(
     "Valid benchmark messages processed by the consumer.",
     ("broker", "phase"),
 )
+_CONSUMER_DUPLICATES = Counter(
+    "benchmark_consumer_duplicate_messages_total",
+    "Benchmark messages delivered more than once to the same consumer.",
+    ("broker", "phase"),
+)
 _CONSUMER_LATENCY = Histogram(
     "benchmark_consumer_latency_seconds",
     "Sampled end-to-end latency from producer timestamp to consumer processing.",
@@ -86,6 +91,10 @@ class ConsumerPrometheusMetrics:
             for phase in ("warmup", "measurement")
         }
         self._latency = _CONSUMER_LATENCY.labels(broker=broker)
+        self._duplicates = {
+            phase: _CONSUMER_DUPLICATES.labels(broker=broker, phase=phase)
+            for phase in ("warmup", "measurement")
+        }
         self._latency_min = _CONSUMER_LATENCY_MIN.labels(broker=broker)
         self._latency_max = _CONSUMER_LATENCY_MAX.labels(broker=broker)
         self._minimum_latency: float | None = None
@@ -93,6 +102,9 @@ class ConsumerPrometheusMetrics:
 
     def received(self, phase: str) -> None:
         self._received[phase].inc()
+
+    def duplicate(self, phase: str) -> None:
+        self._duplicates[phase].inc()
 
     def observe_latency_seconds(self, latency_seconds: float) -> None:
         self._latency.observe(latency_seconds)

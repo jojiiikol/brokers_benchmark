@@ -49,6 +49,7 @@ class ScenarioStatus(enum.Enum):
     STARTING = 'STARTING'
     WARMING_UP = 'WARMING_UP'
     RUNNING = 'RUNNING'
+    DRAINING = 'DRAINING'
     STOPPING = 'STOPPING'
     ERROR = 'ERROR'
     FINISHED = 'FINISHED'
@@ -67,6 +68,7 @@ class Scenario:
     )
     started_at: datetime.datetime | None = None
     warmup_finished_at: datetime.datetime | None = None
+    drain_started_at: datetime.datetime | None = None
     result_path: str | None = None
     error: str | None = None
     container_ids_by_role: dict[str, list[str]] = dataclasses.field(
@@ -76,21 +78,17 @@ class Scenario:
 class ScenarioService:
     MAX_RUNNING_SCENARIO_COUNT: int = 5
     TIMEOUT_SCENARIO_SECONDS: int = 45
-    RESULTS_SCRAPE_GRACE_SECONDS: int = 6
+    PRODUCER_COMPLETION_TIMEOUT_SECONDS: int = 60
+    PRODUCER_COMPLETION_FILE = "/tmp/benchmark-publishing-finished"
 
     def __init__(
             self,
             # configurator: ComponentConfigurator,
             docker_service: SdkDockerService | None = None,
             result_service: ScenarioResultService | None = None,
-            results_scrape_grace_seconds: float = RESULTS_SCRAPE_GRACE_SECONDS,
-
     ):
         self.docker_service = docker_service or SdkDockerService()
         self.result_service = result_service or ScenarioResultService()
-        if results_scrape_grace_seconds < 0:
-            raise ValueError("results_scrape_grace_seconds must be non-negative")
-        self.results_scrape_grace_seconds = results_scrape_grace_seconds
         # self.configurator = ComponentConfigurator(docker_service)
         self.producer_creators: dict[Brokers, BaseProducerCreator] = {
             Brokers.RABBITMQ: RabbitMQProducerCreator(self.docker_service),
@@ -176,8 +174,7 @@ class ScenarioService:
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 "--warmup-seconds", str(scenario.config.warmup_seconds),
                 "--duration-seconds", str(scenario.config.duration_seconds),
-                "--result-retention-seconds",
-                str(self.results_scrape_grace_seconds),
+                "--completion-file", self.PRODUCER_COMPLETION_FILE,
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
             ]
 
@@ -194,11 +191,7 @@ class ScenarioService:
                 "--broker-host", broker_hostname,
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
-                *(
-                    ("--guarantee-type", scenario.config.producer_config.guarantee_type.value)
-                    if scenario.config.broker_config.broker_type is Brokers.RABBITMQ
-                    else ()
-                ),
+                "--guarantee-type", scenario.config.producer_config.guarantee_type.value,
             ]
 
             consumer_containers = await consumer_creator.configurate(
@@ -299,7 +292,7 @@ class ScenarioService:
 
 
     async def start_scenario(self, scenario: Scenario) -> str | None:
-        """Run one scenario through warm-up, measurement and shutdown."""
+        """Run one scenario through warm-up, measurement, draining and shutdown."""
         scenario.status = ScenarioStatus.STARTING
         scenario.started_at = datetime.datetime.now(datetime.UTC)
         try:
@@ -323,8 +316,24 @@ class ScenarioService:
                         scenario.config.duration_seconds)
             await asyncio.sleep(scenario.config.duration_seconds)
 
+            async with asyncio.timeout(self.PRODUCER_COMPLETION_TIMEOUT_SECONDS):
+                async with asyncio.TaskGroup() as producers:
+                    for container_id in scenario.container_ids_by_role["producer"]:
+                        producers.create_task(
+                            self.docker_service.wait_for_container_file(
+                                container_id, self.PRODUCER_COMPLETION_FILE
+                            )
+                        )
+
+            scenario.status = ScenarioStatus.DRAINING
+            scenario.drain_started_at = datetime.datetime.now(datetime.UTC)
+            logger.info(
+                "Scenario %s is draining messages for %s seconds",
+                scenario.id,
+                scenario.config.drain_seconds,
+            )
+            await asyncio.sleep(scenario.config.drain_seconds)
             scenario.status = ScenarioStatus.STOPPING
-            await asyncio.sleep(self.results_scrape_grace_seconds)
             scenario.finished_at = datetime.datetime.now(datetime.UTC)
             await self._save_result(scenario, final_status=ScenarioStatus.FINISHED)
             await self.docker_service.clear_scenario_resources(scenario.id)

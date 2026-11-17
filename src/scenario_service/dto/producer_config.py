@@ -2,10 +2,13 @@ import dataclasses
 import enum
 from typing import Any
 
+from src.scenario_service.dto.component_resources import ComponentResources
+
 
 class LoadType(enum.Enum):
     CONSTANT = "constant"
     LINEAR = "linear"
+    MAX_THROUGHPUT = "max_throughput"
     SPIKE = "spike"
 
     # Compatibility aliases for existing callers. New code must use uppercase
@@ -21,10 +24,10 @@ class GuaranteeType(enum.Enum):
 
 
 @dataclasses.dataclass
-class ProducerConfig:
+class ProducerConfig(ComponentResources):
     load_type: LoadType
     payload_size: int
-    rps: int
+    rps: int | None
     guarantee_type: GuaranteeType
     count: int
     end_rps: int | None = None
@@ -32,20 +35,28 @@ class ProducerConfig:
     max_in_flight: int = 100
 
     def __post_init__(self) -> None:
-        if self.rps <= 0:
-            raise ValueError("rps must be greater than zero")
+        super().__post_init__()
         if self.payload_size <= 0:
             raise ValueError("payload_size must be greater than zero")
         if self.count <= 0:
             raise ValueError("count must be greater than zero")
         if self.max_in_flight <= 0:
             raise ValueError("max_in_flight must be greater than zero")
-        if self.guarantee_type is not GuaranteeType.AT_MOST_ONCE:
+        if self.guarantee_type is GuaranteeType.EXACTLY_ONCE:
             raise ValueError(
-                "Only at_most_once is implemented. "
-                "Do not label a run as at_least_once or exactly_once until "
-                "their acknowledgement semantics are implemented."
+                "exactly_once is not part of the benchmark: it requires "
+                "application-level transactions and deduplication."
             )
+
+        if self.load_type is LoadType.MAX_THROUGHPUT:
+            if any(value is not None for value in (
+                self.rps, self.end_rps, self.step_duration_seconds
+            )):
+                raise ValueError("max_throughput load does not accept a target rps")
+            return
+
+        if self.rps is None or self.rps <= 0:
+            raise ValueError("rps must be greater than zero")
 
         if self.load_type is LoadType.CONSTANT:
             if self.end_rps is not None or self.step_duration_seconds is not None:

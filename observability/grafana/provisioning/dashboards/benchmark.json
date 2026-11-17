@@ -46,7 +46,7 @@
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "cores"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
       "id": 5,
       "targets": [{"expr": "sum by (component) (rate(benchmark_container_cpu_seconds{scenario_id=~\"$scenario_id\"}[1m]))", "legendFormat": "{{component}}", "refId": "A"}],
       "title": "Scenario containers: CPU usage",
@@ -55,7 +55,7 @@
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
       "id": 6,
       "targets": [{"expr": "sum by (component) (benchmark_container_memory_bytes{scenario_id=~\"$scenario_id\"})", "legendFormat": "{{component}}", "refId": "A"}],
       "title": "Scenario containers: memory working set",
@@ -64,7 +64,7 @@
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
       "id": 7,
       "targets": [
         {"expr": "sum by (component) (rate(benchmark_container_network_received_bytes{scenario_id=~\"$scenario_id\"}[1m]))", "legendFormat": "{{component}} rx", "refId": "A"},
@@ -76,7 +76,7 @@
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40},
       "id": 8,
       "targets": [{"expr": "sum by (component) (rate(benchmark_container_disk_written_bytes{scenario_id=~\"$scenario_id\"}[1m]))", "legendFormat": "{{component}}", "refId": "A"}],
       "title": "Scenario containers: disk write throughput",
@@ -89,6 +89,32 @@
       "id": 9,
       "targets": [{"expr": "sum by (broker, scenario_id) (benchmark_consumer_messages_received_total{scenario_id=~\"$scenario_id\"})", "legendFormat": "{{broker}} {{scenario_id}}", "refId": "A"}],
       "title": "Consumer messages received total",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 10,
+      "targets": [
+        {"expr": "sum by (broker, scenario_id) (benchmark_producer_messages_accepted_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"})", "legendFormat": "sent {{broker}} {{scenario_id}}", "refId": "A"},
+        {"expr": "sum by (broker, scenario_id) (benchmark_consumer_messages_received_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"})", "legendFormat": "received {{broker}} {{scenario_id}}", "refId": "B"},
+        {"expr": "sum by (broker, scenario_id) (benchmark_consumer_duplicate_messages_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"})", "legendFormat": "duplicates {{broker}} {{scenario_id}}", "refId": "C"},
+        {"expr": "clamp_min(sum by (broker, scenario_id) (benchmark_producer_messages_accepted_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"}) - (sum by (broker, scenario_id) (benchmark_consumer_messages_received_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"}) - sum by (broker, scenario_id) (benchmark_consumer_duplicate_messages_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"})), 0)", "legendFormat": "lost {{broker}} {{scenario_id}}", "refId": "D"}
+      ],
+      "title": "Delivery reliability counts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 11,
+      "targets": [
+        {"expr": "100 * clamp_min(sum by (broker, scenario_id) (benchmark_producer_messages_accepted_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"}) - (sum by (broker, scenario_id) (benchmark_consumer_messages_received_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"}) - sum by (broker, scenario_id) (benchmark_consumer_duplicate_messages_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"})), 0) / sum by (broker, scenario_id) (benchmark_producer_messages_accepted_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"})", "legendFormat": "lost {{broker}} {{scenario_id}}", "refId": "A"},
+        {"expr": "100 * sum by (broker, scenario_id) (benchmark_consumer_duplicate_messages_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"}) / sum by (broker, scenario_id) (benchmark_consumer_messages_received_total{scenario_id=~\"$scenario_id\",phase=\"measurement\"})", "legendFormat": "duplicates {{broker}} {{scenario_id}}", "refId": "B"}
+      ],
+      "title": "Delivery reliability ratios",
       "type": "timeseries"
     }
   ],
@@ -113,5 +139,5 @@
   "time": {"from": "now-15m", "to": "now"},
   "title": "Message broker benchmark",
   "uid": "broker-benchmark",
-  "version": 3
+  "version": 4
 }

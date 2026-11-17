@@ -10,7 +10,7 @@ import math
 from src.logger.config import setup_logging
 from src.components.common.message_payload import (
     InvalidBenchmarkMessage,
-    decode_message_fields,
+    decode_message_metadata,
 )
 from src.components.common.prometheus_metrics import (
     ConsumerPrometheusMetrics,
@@ -98,6 +98,7 @@ class Consumer:
         self.received_messages_total = 0
         self.measurement_messages_total = 0
         self._completed_metrics_windows = 0
+        self._seen_message_ids: set[int] = set()
         self.prometheus_metrics = ConsumerPrometheusMetrics("rabbitmq")
 
     @property
@@ -169,13 +170,17 @@ class Consumer:
 
     def _observe_message(self, body: bytes) -> None:
         try:
-            phase, sent_at = decode_message_fields(body)
+            phase, sent_at, message_id = decode_message_metadata(body)
         except InvalidBenchmarkMessage as error:
             logger.warning("Received malformed benchmark message: %s", error)
             return
 
         self.received_messages_total += 1
         self.prometheus_metrics.received(phase)
+        if message_id in self._seen_message_ids:
+            self.prometheus_metrics.duplicate(phase)
+        else:
+            self._seen_message_ids.add(message_id)
         if phase == "measurement":
             self.measurement_messages_total += 1
             if self.measurement_messages_total % self.latency_sample_every == 0:
@@ -252,7 +257,7 @@ async def main():
     )
     parser.add_argument(
         "--guarantee-type",
-        choices=("at_most_once", "at_least_once", "exactly_once"),
+        choices=("at_most_once", "at_least_once"),
         default="at_most_once",
     )
     args = parser.parse_args()

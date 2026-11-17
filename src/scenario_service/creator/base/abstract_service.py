@@ -1,6 +1,7 @@
 import abc
 
 from src.docker_configurator import ContainerConfig
+from src.docker_configurator.schema import ResourceLimits
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_creator import BaseCreator, ConfigT
 from src.scenario_service.dto.consumer_config import ConsumerConfig
@@ -59,6 +60,14 @@ class BaseServiceCreator(BaseCreator):
                 name=f"{component_type}-{scenario_id}{instance_suffix}",
                 network_name=f"network-{scenario_id}",
                 cmd=docker_args,
+                resources=ResourceLimits(
+                    nano_cpus=round(config.cpu_limit * 1_000_000_000),
+                    memory=(
+                        config.memory_limit_mib * 1024 ** 2
+                        if config.memory_limit_mib is not None
+                        else None
+                    ),
+                ),
                 labels={
                     "component": component_type,
                     "prometheus.scrape": "true",

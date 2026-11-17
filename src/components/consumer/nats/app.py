@@ -18,7 +18,7 @@ from nats.js.errors import APIError, NotFoundError
 from src.logger.config import setup_logging
 from src.components.common.message_payload import (
     InvalidBenchmarkMessage,
-    decode_message_fields,
+    decode_message_metadata,
 )
 from src.components.common.prometheus_metrics import (
     ConsumerPrometheusMetrics,
@@ -65,6 +65,7 @@ class NatsConsumer:
             consumer_name: str,
             consumer_mode: str,
             interaction_mode: str,
+            guarantee_type: str = "at_most_once",
             metrics_window_size: int = 100,
             latency_sample_every: int = 10,
             metrics_log_every_windows: int = 10,
@@ -75,6 +76,9 @@ class NatsConsumer:
         self.consumer_name = consumer_name
         self.consumer_mode = consumer_mode
         self.interaction_mode = interaction_mode
+        if guarantee_type not in ("at_most_once", "at_least_once"):
+            raise ValueError(f"Unsupported delivery guarantee: {guarantee_type}")
+        self.guarantee_type = guarantee_type
         if min(metrics_window_size, latency_sample_every, metrics_log_every_windows) <= 0:
             raise ValueError("metrics window, sampling and logging intervals must be greater than zero")
         self.metrics_window_size = metrics_window_size
@@ -86,6 +90,7 @@ class NatsConsumer:
         self.received_messages_total = 0
         self.measurement_messages_total = 0
         self._completed_metrics_windows = 0
+        self._seen_message_ids: set[int] = set()
         self.prometheus_metrics = ConsumerPrometheusMetrics("nats")
 
     async def connect(self) -> None:
@@ -112,7 +117,11 @@ class NatsConsumer:
             await self.js.add_stream(config=StreamConfig(
                 name=STREAM_NAME,
                 subjects=[SUBJECT],
-                storage=StorageType.MEMORY,
+                storage=(
+                    StorageType.FILE
+                    if self.guarantee_type == "at_least_once"
+                    else StorageType.MEMORY
+                ),
                 retention=RetentionPolicy.INTEREST,
             ))
             logger.info("Created NATS stream %s with interest retention", STREAM_NAME)
@@ -127,10 +136,9 @@ class NatsConsumer:
             # warm-up or measurement messages.
             deliver_policy=DeliverPolicy.ALL,
             # JetStream pull consumers require explicit acknowledgement.
-            # Push is the at-most-once baseline and therefore uses AckNone.
             ack_policy=(
                 AckPolicy.EXPLICIT
-                if self.consumer_mode == "pull"
+                if self.consumer_mode == "pull" or self.guarantee_type == "at_least_once"
                 else AckPolicy.NONE
             ),
         )
@@ -173,6 +181,8 @@ class NatsConsumer:
 
         async def handler(message) -> None:
             self._observe(message.data)
+            if self.guarantee_type == "at_least_once":
+                await message.ack()
 
         queue = self.consumer_name if self.interaction_mode == "work_queue" else ""
         await self.js.subscribe(
@@ -189,9 +199,13 @@ class NatsConsumer:
 
     def _observe(self, body: bytes) -> None:
         try:
-            phase, sent_at = decode_message_fields(body)
+            phase, sent_at, message_id = decode_message_metadata(body)
             self.received_messages_total += 1
             self.prometheus_metrics.received(phase)
+            if message_id in self._seen_message_ids:
+                self.prometheus_metrics.duplicate(phase)
+            else:
+                self._seen_message_ids.add(message_id)
             if phase == "measurement":
                 self.measurement_messages_total += 1
                 if self.measurement_messages_total % self.latency_sample_every == 0:
@@ -240,13 +254,14 @@ async def main() -> None:
     parser.add_argument("--consumer-name", required=True)
     parser.add_argument("--consumer-mode", choices=("pull", "push"), required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
+    parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
     parser.add_argument("--metrics-window-size", type=int, default=100)
     parser.add_argument("--latency-sample-every", type=int, default=10)
     parser.add_argument("--metrics-log-every-windows", type=int, default=10)
     args = parser.parse_args()
     consumer = NatsConsumer(
         args.broker_host, args.broker_port, args.consumer_name,
-        args.consumer_mode, args.interaction_mode, args.metrics_window_size,
+        args.consumer_mode, args.interaction_mode, args.guarantee_type, args.metrics_window_size,
         args.latency_sample_every, args.metrics_log_every_windows,
     )
     start_metrics_server()
