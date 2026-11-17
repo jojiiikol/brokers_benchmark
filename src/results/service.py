@@ -93,6 +93,23 @@ class PrometheusScenarioResultsCollector:
             f"(benchmark_consumer_latency_seconds_bucket{{{selector}}}))"
         )
 
+    async def wait_for_final_metrics(self, scenario_id: str, expected: int, timeout: float) -> bool:
+        query = f'count(benchmark_component_metrics_final{{scenario_id="{scenario_id}"}} == 1)'
+        try:
+            async with asyncio.timeout(timeout):
+                while True:
+                    if await self._query(query) == expected:
+                        return True
+                    await asyncio.sleep(0.5)
+        except TimeoutError:
+            logger.warning("Final Prometheus scrape incomplete for scenario %s", scenario_id)
+            return False
+
+    async def received_at_drain(self, scenario_id: str) -> int | None:
+        return _as_int(await self._query(
+            f'sum(benchmark_consumer_received_at_drain{{scenario_id="{scenario_id}",component="consumer"}})'
+        ))
+
     async def _query(self, query: str) -> float | None:
         try:
             response = await asyncio.to_thread(
@@ -126,6 +143,9 @@ class ScenarioResultService:
         )
         self._collector = collector or PrometheusScenarioResultsCollector()
 
+    async def wait_for_final_metrics(self, scenario_id: str, expected: int, timeout: float) -> bool:
+        return await self._collector.wait_for_final_metrics(scenario_id, expected, timeout)
+
     async def save(self, scenario: Any, final_status: str) -> Path:
         metrics = await self._collector.collect(scenario.id)
         if scenario.config.interaction_mode is InteractionMode.PUB_SUB:
@@ -142,6 +162,24 @@ class ScenarioResultService:
                     messages.get("consumer_duplicates"),
                 ),
             }
+        if scenario.drain_completed is not None:
+            received = metrics["messages"]["consumer_received"]
+            received_at_drain = (
+                await self._collector.received_at_drain(scenario.id)
+                if scenario.final_metrics_collected else None
+            )
+            metrics["drain"] = {
+                "completed": scenario.drain_completed,
+                "pending_at_last_check": scenario.drain_pending_messages,
+                "final_metrics_collected": scenario.final_metrics_collected,
+                "late_deliveries": (
+                    received - received_at_drain
+                    if received is not None and received_at_drain is not None else None
+                ),
+            }
+            if not scenario.drain_completed or not scenario.final_metrics_collected:
+                metrics["reliability"]["lost_messages"] = None
+                metrics["reliability"]["lost_share_percent"] = None
         artifact = {
             "schema_version": 1,
             "scenario": {
@@ -151,6 +189,7 @@ class ScenarioResultService:
                 "created_at": _serialize(scenario.created_at),
                 "started_at": _serialize(scenario.started_at),
                 "warmup_finished_at": _serialize(scenario.warmup_finished_at),
+                "measurement_started_at": _serialize(scenario.measurement_started_at),
                 "drain_started_at": _serialize(scenario.drain_started_at),
                 "finished_at": _serialize(scenario.finished_at),
                 "configuration": _serialize(scenario.config),

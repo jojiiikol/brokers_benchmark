@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from pathlib import Path
+import signal
 import time
 
 import aio_pika
@@ -13,9 +15,12 @@ from src.components.common.message_payload import (
     decode_message_metadata,
 )
 from src.components.common.prometheus_metrics import (
+    COMPONENT_METRICS_FINAL,
+    CONSUMER_RECEIVED_AT_DRAIN,
     ConsumerPrometheusMetrics,
     start_metrics_server,
 )
+from src.components.common.phase_control import READY
 load_dotenv()
 logger = logging.getLogger("benchmark.consumer.rabbitmq")
 
@@ -146,7 +151,7 @@ class Consumer:
             )
             logger.info("Declared RabbitMQ work queue %s", self.queue_name)
 
-    async def consume(self) -> None:
+    async def consume(self, ready_file: str | None = None) -> None:
         if self._channel is None or self._queue is None:
             raise RuntimeError("Consumer is not connected")
 
@@ -159,6 +164,8 @@ class Consumer:
         )
         try:
             async with self._queue.iterator(no_ack=no_ack) as queue_iter:
+                if ready_file is not None:
+                    Path(ready_file).touch()
                 async for message in queue_iter:
                     if no_ack:
                         self._observe_message(message.body)
@@ -260,6 +267,7 @@ async def main():
         choices=("at_most_once", "at_least_once"),
         default="at_most_once",
     )
+    parser.add_argument("--synchronized", action="store_true")
     args = parser.parse_args()
 
     consumer = Consumer(
@@ -275,8 +283,37 @@ async def main():
     start_metrics_server()
     await consumer._connect()
     await consumer.declare_queue()
-    await consumer.consume(
+    if not args.synchronized:
+        await consumer.consume()
+        return
+
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    loop.add_signal_handler(signal.SIGUSR1, stop.set)
+    loop.add_signal_handler(
+        signal.SIGUSR2,
+        lambda: CONSUMER_RECEIVED_AT_DRAIN.set(consumer.measurement_messages_total),
     )
+    consuming = asyncio.create_task(consumer.consume(READY))
+    stopping = asyncio.create_task(stop.wait())
+    try:
+        done, _ = await asyncio.wait((consuming, stopping), return_when=asyncio.FIRST_COMPLETED)
+        if consuming in done:
+            await consuming
+            raise RuntimeError("RabbitMQ subscription ended before finalization")
+        consuming.cancel()
+        try:
+            await consuming
+        except asyncio.CancelledError:
+            pass
+        await consumer.close()
+        COMPONENT_METRICS_FINAL.set(1)
+        await asyncio.Event().wait()
+    finally:
+        consuming.cancel()
+        stopping.cancel()
+        loop.remove_signal_handler(signal.SIGUSR1)
+        loop.remove_signal_handler(signal.SIGUSR2)
 
 
 
