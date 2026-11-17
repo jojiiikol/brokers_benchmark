@@ -51,6 +51,7 @@ class ScenarioStatus(enum.Enum):
     RUNNING = 'RUNNING'
     DRAINING = 'DRAINING'
     STOPPING = 'STOPPING'
+    CANCELLED = 'CANCELLED'
     ERROR = 'ERROR'
     FINISHED = 'FINISHED'
 
@@ -342,10 +343,9 @@ class ScenarioService:
         except asyncio.CancelledError:
             scenario.status = ScenarioStatus.STOPPING
             scenario.finished_at = datetime.datetime.now(datetime.UTC)
-            await self._save_result(scenario, final_status=ScenarioStatus.ERROR)
+            await self._save_result(scenario, final_status=ScenarioStatus.CANCELLED)
             await self.docker_service.clear_scenario_resources(scenario.id)
-            scenario.status = ScenarioStatus.ERROR
-            scenario.error = "Scenario task was cancelled"
+            scenario.status = ScenarioStatus.CANCELLED
             raise
         except Exception as e:
             logger.exception("Scenario %s failed", scenario.id)
@@ -354,6 +354,21 @@ class ScenarioService:
             scenario.finished_at = datetime.datetime.now(datetime.UTC)
             await self._save_result(scenario, final_status=ScenarioStatus.ERROR)
             await self.docker_service.clear_scenario_resources(scenario.id)
+
+    async def cancel_scenario(self, scenario: Scenario) -> None:
+        """Cancel a scenario that has not been assigned a running task yet."""
+        if scenario.status in {
+            ScenarioStatus.CANCELLED,
+            ScenarioStatus.ERROR,
+            ScenarioStatus.FINISHED,
+        }:
+            return
+
+        scenario.status = ScenarioStatus.STOPPING
+        scenario.finished_at = datetime.datetime.now(datetime.UTC)
+        await self._save_result(scenario, final_status=ScenarioStatus.CANCELLED)
+        await self.docker_service.clear_scenario_resources(scenario.id)
+        scenario.status = ScenarioStatus.CANCELLED
 
     async def _start_role(self, scenario: Scenario, role: str) -> None:
         for container_id in scenario.container_ids_by_role[role]:
