@@ -12,6 +12,23 @@ services:
     networks:
       - observability
 
+  benchmark-cli:
+    profiles: ["cli"]
+    build:
+      context: .
+    entrypoint: ["python", "-m", "src.cli"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./results:/app/results
+    environment:
+      OBSERVABILITY_NETWORK: brokers_benchmark_observability
+    expose:
+      - "8000"
+    depends_on:
+      - prometheus
+    networks:
+      - observability
+
   prometheus:
     image: prom/prometheus:v3.12.0
     # Docker Desktop socket is owned by root. Prometheus needs read access to
