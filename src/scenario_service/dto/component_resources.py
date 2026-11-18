@@ -4,8 +4,8 @@ import math
 
 @dataclasses.dataclass(kw_only=True)
 class ComponentResources:
-    cpu_limit: float = 2.0
-    memory_limit_mib: int | None = None
+    cpu_limit: float = 1.0
+    memory_limit_mib: int | None = 1024
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.cpu_limit) or self.cpu_limit < 0.001:
