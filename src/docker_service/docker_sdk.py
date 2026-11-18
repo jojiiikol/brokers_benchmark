@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import logging
 import pathlib
 import tarfile
@@ -405,6 +406,40 @@ class SdkDockerService:
                 archive.close()
                 return
             await asyncio.sleep(0.5)
+
+    async def write_container_file(self, container_id: str, path: str, contents: str) -> None:
+        container = await self.client.containers.get(container_id)
+        destination = pathlib.PurePosixPath(path)
+        data = contents.encode()
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            entry = tarfile.TarInfo(destination.name)
+            entry.size = len(data)
+            entry.mode = 0o644
+            archive.addfile(entry, io.BytesIO(data))
+        await container.put_archive(str(destination.parent), buffer.getvalue())
+
+    async def signal_container(self, container_id: str, signal: str) -> None:
+        container = await self.client.containers.get(container_id)
+        await container.kill(signal=signal)
+
+    async def rabbitmq_queue_pending(self, container_id: str, queue: str) -> int:
+        container = await self.client.containers.get(container_id)
+        command = await container.exec([
+            "rabbitmqctl", "--quiet", "list_queues", "--formatter", "json",
+            "name", "messages_ready", "messages_unacknowledged",
+        ])
+        chunks = []
+        async with command.start() as stream:
+            while (message := await stream.read_out()) is not None:
+                if message.stream == 1:
+                    chunks.append(message.data)
+        if (await command.inspect())["ExitCode"] != 0:
+            raise RuntimeError(f"Could not read queues from RabbitMQ container {container_id}")
+        for row in json.loads(b"".join(chunks)):
+            if row["name"] == queue:
+                return int(row["messages_ready"]) + int(row["messages_unacknowledged"])
+        raise RuntimeError(f"RabbitMQ queue {queue!r} is missing")
 
     async def wait_container_ready(
             self,
