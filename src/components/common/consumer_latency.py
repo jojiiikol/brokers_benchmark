@@ -1,0 +1,49 @@
+"""Shared defaults and percentile calculation for consumer latency logs."""
+
+import argparse
+import math
+
+
+DEFAULT_METRICS_WINDOW_SIZE = 1000
+DEFAULT_LATENCY_SAMPLE_EVERY = 10
+DEFAULT_METRICS_LOG_EVERY_WINDOWS = 100
+
+
+def add_consumer_latency_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--metrics-window-size", type=int, default=DEFAULT_METRICS_WINDOW_SIZE,
+        help="Number of latency samples in one percentile window",
+    )
+    parser.add_argument("--latency-sample-every", type=int, default=DEFAULT_LATENCY_SAMPLE_EVERY)
+    parser.add_argument(
+        "--metrics-log-every-windows", type=int, default=DEFAULT_METRICS_LOG_EVERY_WINDOWS,
+    )
+
+
+class LatencyMetrics:
+    PERCENTILES = (50, 75, 95, 99)
+
+    def __init__(self) -> None:
+        self._values_ms: list[float] = []
+
+    def observe(self, latency_ms: float) -> None:
+        self._values_ms.append(latency_ms)
+
+    @property
+    def count(self) -> int:
+        return len(self._values_ms)
+
+    def summary(self) -> dict[str, float | int | None]:
+        result: dict[str, float | int | None] = {"count": self.count}
+        if not self._values_ms:
+            result.update({f"p{percentile}_ms": None for percentile in self.PERCENTILES})
+            return result
+
+        values = sorted(self._values_ms)
+        for percentile in self.PERCENTILES:
+            rank = (len(values) - 1) * percentile / 100
+            lower, upper = math.floor(rank), math.ceil(rank)
+            result[f"p{percentile}_ms"] = (
+                values[lower] + (values[upper] - values[lower]) * (rank - lower)
+            )
+        return result
