@@ -231,7 +231,10 @@ class OrchestratorShutdownTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = Orchestrator()
         finished = type("ScenarioStub", (), {"status": ScenarioStatus.FINISHED})()
         failed = type("ScenarioStub", (), {"status": ScenarioStatus.ERROR})()
-        orchestrator.scenario_storage = [finished, failed]
+        cancelled = type(
+            "ScenarioStub", (), {"status": ScenarioStatus.CANCELLED}
+        )()
+        orchestrator.scenario_storage = [finished, failed, cancelled]
 
         self.assertTrue(orchestrator._all_scenarios_complete)
 
@@ -279,6 +282,54 @@ class OrchestratorShutdownTests(unittest.IsolatedAsyncioTestCase):
         await orchestrator.shutdown(clear_all_resources=False)
 
         self.assertEqual(docker.cleaned_scenarios, ["owned-scenario"])
+
+    async def test_stops_one_queued_scenario_without_global_cleanup(self):
+        class ScenarioService:
+            def __init__(self):
+                self.cancelled = []
+
+            async def cancel_scenario(self, scenario):
+                self.cancelled.append(scenario.id)
+                scenario.status = ScenarioStatus.CANCELLED
+
+        orchestrator = Orchestrator()
+        scenario = await orchestrator.scenario_service.create_scenario(
+            scenario_config()
+        )
+        orchestrator.scenario_storage.append(scenario)
+        scenario_service = ScenarioService()
+        orchestrator.scenario_service = scenario_service
+
+        stopped = await orchestrator.stop_scenario(scenario.id)
+
+        self.assertIs(stopped, scenario)
+        self.assertEqual(stopped.status, ScenarioStatus.CANCELLED)
+        self.assertEqual(scenario_service.cancelled, [scenario.id])
+
+    async def test_stops_running_scenario_task(self):
+        orchestrator = Orchestrator()
+        scenario = await orchestrator.scenario_service.create_scenario(
+            scenario_config()
+        )
+        scenario.status = ScenarioStatus.RUNNING
+        orchestrator.scenario_storage.append(scenario)
+
+        async def running_scenario():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                scenario.status = ScenarioStatus.CANCELLED
+                raise
+
+        task = asyncio.create_task(running_scenario())
+        await asyncio.sleep(0)
+        orchestrator.scenario_tasks[scenario.id] = task
+
+        stopped = await orchestrator.stop_scenario(scenario.id)
+
+        self.assertTrue(task.cancelled())
+        self.assertEqual(stopped.status, ScenarioStatus.CANCELLED)
+        self.assertNotIn(scenario.id, orchestrator.scenario_tasks)
 
 
 class OrchestratorObserverTests(unittest.IsolatedAsyncioTestCase):

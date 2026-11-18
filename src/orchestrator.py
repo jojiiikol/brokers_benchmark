@@ -27,6 +27,7 @@ class Orchestrator:
         self._observer = observer
 
         self.create_image_lock = asyncio.Lock()
+        self._scenario_operation_lock = asyncio.Lock()
 
     def set_observer(self, observer: ScenarioObserver | None) -> None:
         """Attach or detach an optional scenario observer at runtime."""
@@ -80,29 +81,65 @@ class Orchestrator:
         await self._notify_observer()
         return scenario.id
 
-    async def start_scenario(self):
-        if not self._check_run_available:
-            return
-
-        older_scenario = self._get_older_scenario(ScenarioStatus.PENDING)
-        if older_scenario is None:
-            return
-
-        task = asyncio.create_task(
-            self.scenario_service.start_scenario(older_scenario),
-            name=f"scenario-{older_scenario.id}",
+    def get_scenario(self, scenario_id: str) -> Scenario | None:
+        return next(
+            (
+                scenario
+                for scenario in self.scenario_storage
+                if scenario.id == scenario_id
+            ),
+            None,
         )
-        self.scenario_tasks[older_scenario.id] = task
-        return older_scenario.id
 
-    async def _initialize_scenario(self):
-        async with self.create_image_lock:
-            older = self._get_older_scenario(ScenarioStatus.CREATED)
-            if older is None:
-                logger.info("Not new scenario")
+    def list_scenarios(self) -> list[Scenario]:
+        return list(self.scenario_storage)
+
+    async def start_scenario(self):
+        async with self._scenario_operation_lock:
+            if not self._check_run_available:
                 return
 
-            await self.scenario_service.initialize_scenario(older)
+            older_scenario = self._get_older_scenario(ScenarioStatus.PENDING)
+            if older_scenario is None:
+                return
+
+            task = asyncio.create_task(
+                self.scenario_service.start_scenario(older_scenario),
+                name=f"scenario-{older_scenario.id}",
+            )
+            self.scenario_tasks[older_scenario.id] = task
+            return older_scenario.id
+
+    async def _initialize_scenario(self):
+        async with self._scenario_operation_lock:
+            async with self.create_image_lock:
+                older = self._get_older_scenario(ScenarioStatus.CREATED)
+                if older is None:
+                    logger.info("Not new scenario")
+                    return
+
+                await self.scenario_service.initialize_scenario(older)
+
+    async def stop_scenario(self, scenario_id: str) -> Scenario | None:
+        """Stop one scenario and clean only the Docker resources it owns."""
+        async with self._scenario_operation_lock:
+            scenario = self.get_scenario(scenario_id)
+            if scenario is None:
+                return None
+
+            task = self.scenario_tasks.pop(scenario_id, None)
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            elif scenario.status not in {
+                ScenarioStatus.CANCELLED,
+                ScenarioStatus.ERROR,
+                ScenarioStatus.FINISHED,
+            }:
+                await self.scenario_service.cancel_scenario(scenario)
+
+            await self._notify_observer()
+            return scenario
 
 
     async def _process(self, stop_when_complete: bool = False) -> None:
@@ -122,7 +159,11 @@ class Orchestrator:
     @property
     def _all_scenarios_complete(self) -> bool:
         return bool(self.scenario_storage) and not self.scenario_tasks and all(
-            scenario.status in {ScenarioStatus.ERROR, ScenarioStatus.FINISHED}
+            scenario.status in {
+                ScenarioStatus.CANCELLED,
+                ScenarioStatus.ERROR,
+                ScenarioStatus.FINISHED,
+            }
             for scenario in self.scenario_storage
         )
 

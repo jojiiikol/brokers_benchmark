@@ -62,6 +62,7 @@ class PrometheusOrchestratorObserver:
     _STATUSES = (
         "CREATED", "INITIALIZING", "PENDING", "STARTING", "WARMING_UP",
         "RUNNING", "DRAINING", "STOPPING", "ERROR", "FINISHED",
+        "CANCELLED",
     )
 
     def __init__(self, docker_service: Any) -> None:
