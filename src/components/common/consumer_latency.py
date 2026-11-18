@@ -1,26 +1,17 @@
-"""Shared defaults and percentile calculation for consumer latency logs."""
+"""Shared consumer-side latency sampling and log-window configuration."""
 
 import argparse
 import math
 
 
-DEFAULT_METRICS_WINDOW_SIZE = 1000
+DEFAULT_METRICS_WINDOW_SIZE = 1_000
 DEFAULT_LATENCY_SAMPLE_EVERY = 10
 DEFAULT_METRICS_LOG_EVERY_WINDOWS = 100
 
 
-def add_consumer_latency_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--metrics-window-size", type=int, default=DEFAULT_METRICS_WINDOW_SIZE,
-        help="Number of latency samples in one percentile window",
-    )
-    parser.add_argument("--latency-sample-every", type=int, default=DEFAULT_LATENCY_SAMPLE_EVERY)
-    parser.add_argument(
-        "--metrics-log-every-windows", type=int, default=DEFAULT_METRICS_LOG_EVERY_WINDOWS,
-    )
-
-
 class LatencyMetrics:
+    """In-memory percentile aggregation for one reporting window."""
+
     PERCENTILES = (50, 75, 95, 99)
 
     def __init__(self) -> None:
@@ -47,3 +38,24 @@ class LatencyMetrics:
                 values[lower] + (values[upper] - values[lower]) * (rank - lower)
             )
         return result
+
+
+def add_consumer_latency_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--metrics-window-size",
+        type=int,
+        default=DEFAULT_METRICS_WINDOW_SIZE,
+        help="Number of sampled latencies in one reporting window",
+    )
+    parser.add_argument(
+        "--latency-sample-every",
+        type=int,
+        default=DEFAULT_LATENCY_SAMPLE_EVERY,
+        help="Observe latency for every Nth measurement message",
+    )
+    parser.add_argument(
+        "--metrics-log-every-windows",
+        type=int,
+        default=DEFAULT_METRICS_LOG_EVERY_WINDOWS,
+        help="Log one latency summary after this many completed windows",
+    )
