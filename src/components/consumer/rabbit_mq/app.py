@@ -8,11 +8,17 @@ import aio_pika
 from aiormq import AMQPConnectionError
 from dotenv import load_dotenv
 import argparse
-import math
 from src.logger.config import setup_logging
 from src.components.common.message_payload import (
     InvalidBenchmarkMessage,
     decode_message_metadata,
+)
+from src.components.common.consumer_latency import (
+    DEFAULT_LATENCY_SAMPLE_EVERY,
+    DEFAULT_METRICS_LOG_EVERY_WINDOWS,
+    DEFAULT_METRICS_WINDOW_SIZE,
+    LatencyMetrics,
+    add_consumer_latency_arguments,
 )
 from src.components.common.prometheus_metrics import (
     COMPONENT_METRICS_FINAL,
@@ -23,39 +29,6 @@ from src.components.common.prometheus_metrics import (
 from src.components.common.phase_control import READY
 load_dotenv()
 logger = logging.getLogger("benchmark.consumer.rabbitmq")
-
-
-class LatencyMetrics:
-    """In-memory percentile aggregation for one measurement phase."""
-
-    PERCENTILES = (50, 75, 95, 99)
-
-    def __init__(self) -> None:
-        self._values_ms: list[float] = []
-
-    def observe(self, latency_ms: float) -> None:
-        self._values_ms.append(latency_ms)
-
-    @property
-    def count(self) -> int:
-        return len(self._values_ms)
-
-    def summary(self) -> dict[str, float | int | None]:
-        result: dict[str, float | int | None] = {"count": len(self._values_ms)}
-        for percentile in self.PERCENTILES:
-            result[f"p{percentile}_ms"] = self._percentile(percentile)
-        return result
-
-    def _percentile(self, percentile: int) -> float | None:
-        if not self._values_ms:
-            return None
-        values = sorted(self._values_ms)
-        rank = (len(values) - 1) * percentile / 100
-        lower = math.floor(rank)
-        upper = math.ceil(rank)
-        if lower == upper:
-            return values[lower]
-        return values[lower] + (values[upper] - values[lower]) * (rank - lower)
 
 
 class Consumer:
@@ -69,9 +42,9 @@ class Consumer:
             broker_password: str = "guest",
             broker_host: str = "rabbit_mq",
             broker_port: str = "5672",
-            metrics_window_size: int = 100,
-            latency_sample_every: int = 10,
-            metrics_log_every_windows: int = 10,
+            metrics_window_size: int = DEFAULT_METRICS_WINDOW_SIZE,
+            latency_sample_every: int = DEFAULT_LATENCY_SAMPLE_EVERY,
+            metrics_log_every_windows: int = DEFAULT_METRICS_LOG_EVERY_WINDOWS,
             interaction_mode: str = "work_queue",
             guarantee_type: str = "at_most_once",
 
@@ -252,12 +225,7 @@ async def main():
     parser.add_argument(
         "--broker-port", type=str, default="5672", required=False, help="RabbitMQ broker port"
     )
-    parser.add_argument(
-        "--metrics-window-size", type=int, default=1000,
-        help="Number of latency samples in one percentile window",
-    )
-    parser.add_argument("--latency-sample-every", type=int, default=10)
-    parser.add_argument("--metrics-log-every-windows", type=int, default=100)
+    add_consumer_latency_arguments(parser)
     parser.add_argument(
         "--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue",
         help="RabbitMQ delivery topology",

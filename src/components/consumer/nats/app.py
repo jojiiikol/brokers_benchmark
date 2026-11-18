@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import logging
-import math
 import time
 
 import nats
@@ -20,6 +19,13 @@ from src.components.common.message_payload import (
     InvalidBenchmarkMessage,
     decode_message_metadata,
 )
+from src.components.common.consumer_latency import (
+    DEFAULT_LATENCY_SAMPLE_EVERY,
+    DEFAULT_METRICS_LOG_EVERY_WINDOWS,
+    DEFAULT_METRICS_WINDOW_SIZE,
+    LatencyMetrics,
+    add_consumer_latency_arguments,
+)
 from src.components.common.prometheus_metrics import (
     ConsumerPrometheusMetrics,
     start_metrics_server,
@@ -32,31 +38,6 @@ SUBJECT = "scenario.messages"
 logger = logging.getLogger("benchmark.consumer.nats")
 
 
-class LatencyMetrics:
-    PERCENTILES = (50, 75, 95, 99)
-
-    def __init__(self) -> None:
-        self.values_ms: list[float] = []
-
-    def observe(self, value: float) -> None:
-        self.values_ms.append(value)
-
-    @property
-    def count(self) -> int:
-        return len(self.values_ms)
-
-    def summary(self) -> dict[str, float | int | None]:
-        result: dict[str, float | int | None] = {"count": len(self.values_ms)}
-        if not self.values_ms:
-            return {**result, **{f"p{p}_ms": None for p in self.PERCENTILES}}
-        values = sorted(self.values_ms)
-        for percentile in self.PERCENTILES:
-            rank = (len(values) - 1) * percentile / 100
-            lower, upper = math.floor(rank), math.ceil(rank)
-            result[f"p{percentile}_ms"] = values[lower] if lower == upper else values[lower] + (values[upper] - values[lower]) * (rank - lower)
-        return result
-
-
 class NatsConsumer:
     def __init__(
             self,
@@ -66,9 +47,9 @@ class NatsConsumer:
             consumer_mode: str,
             interaction_mode: str,
             guarantee_type: str = "at_most_once",
-            metrics_window_size: int = 100,
-            latency_sample_every: int = 10,
-            metrics_log_every_windows: int = 10,
+            metrics_window_size: int = DEFAULT_METRICS_WINDOW_SIZE,
+            latency_sample_every: int = DEFAULT_LATENCY_SAMPLE_EVERY,
+            metrics_log_every_windows: int = DEFAULT_METRICS_LOG_EVERY_WINDOWS,
     ) -> None:
         if consumer_mode not in ("pull", "push"):
             raise ValueError(f"Unsupported consumer mode {consumer_mode}")
@@ -255,9 +236,7 @@ async def main() -> None:
     parser.add_argument("--consumer-mode", choices=("pull", "push"), required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
-    parser.add_argument("--metrics-window-size", type=int, default=100)
-    parser.add_argument("--latency-sample-every", type=int, default=10)
-    parser.add_argument("--metrics-log-every-windows", type=int, default=10)
+    add_consumer_latency_arguments(parser)
     args = parser.parse_args()
     consumer = NatsConsumer(
         args.broker_host, args.broker_port, args.consumer_name,
