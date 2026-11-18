@@ -5,9 +5,11 @@ import enum
 import logging
 import os
 import pathlib
+import time
 import uuid
 
 from src.config import CONTAINERS_NAMESPACE
+from src.components.common.phase_control import MEASUREMENT_START, READY, WARMUP_DONE, WARMUP_START
 from src.docker_configurator import ContainerConfig
 from src.docker_service.docker_sdk import SdkDockerService
 from src.scenario_service.creator.base.abstract_broker import BaseBrokerCreator
@@ -69,7 +71,11 @@ class Scenario:
     )
     started_at: datetime.datetime | None = None
     warmup_finished_at: datetime.datetime | None = None
+    measurement_started_at: datetime.datetime | None = None
     drain_started_at: datetime.datetime | None = None
+    drain_pending_messages: int | None = None
+    drain_completed: bool | None = None
+    final_metrics_collected: bool | None = None
     result_path: str | None = None
     error: str | None = None
     container_ids_by_role: dict[str, list[str]] = dataclasses.field(
@@ -81,6 +87,8 @@ class ScenarioService:
     TIMEOUT_SCENARIO_SECONDS: int = 45
     PRODUCER_COMPLETION_TIMEOUT_SECONDS: int = 60
     PRODUCER_COMPLETION_FILE = "/tmp/benchmark-publishing-finished"
+    PHASE_RELEASE_LEAD_SECONDS: float = 1
+    FINAL_SCRAPE_TIMEOUT_SECONDS: float = 15
 
     def __init__(
             self,
@@ -178,6 +186,10 @@ class ScenarioService:
                 "--completion-file", self.PRODUCER_COMPLETION_FILE,
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
             ]
+            if self._uses_synchronized_lifecycle(scenario):
+                producer_args.extend((
+                    "--synchronized-producer-count", str(scenario.config.producer_config.count),
+                ))
 
             producer_containers = await producer_creator.configurate(
                 scenario_id=scenario_id,
@@ -194,6 +206,8 @@ class ScenarioService:
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
                 "--guarantee-type", scenario.config.producer_config.guarantee_type.value,
             ]
+            if self._uses_synchronized_lifecycle(scenario):
+                consumer_args.append("--synchronized")
 
             consumer_containers = await consumer_creator.configurate(
                 scenario_id=scenario_id,
@@ -303,28 +317,32 @@ class ScenarioService:
             await self._start_role(scenario, "consumer")
             await self._start_role(scenario, "producer")
 
+            producers = scenario.container_ids_by_role["producer"]
+            consumers = scenario.container_ids_by_role["consumer"]
+            synchronized = self._uses_synchronized_lifecycle(scenario)
+            if synchronized:
+                await self._wait_for_files(producers + consumers, READY)
             scenario.status = ScenarioStatus.WARMING_UP
-            logger.info(
-                "Scenario %s is warming up with message traffic for %s seconds",
-                scenario.id,
-                scenario.config.warmup_seconds,
-            )
+            logger.info("Scenario %s is warming up for %s seconds",
+                        scenario.id, scenario.config.warmup_seconds)
+            if synchronized:
+                await self._release_phase(producers, WARMUP_START)
             await asyncio.sleep(scenario.config.warmup_seconds)
+            if synchronized:
+                await self._wait_for_files(producers, WARMUP_DONE)
             scenario.warmup_finished_at = datetime.datetime.now(datetime.UTC)
 
+            if synchronized:
+                scenario.measurement_started_at = await self._release_phase(
+                    producers, MEASUREMENT_START
+                )
+            else:
+                scenario.measurement_started_at = scenario.warmup_finished_at
             scenario.status = ScenarioStatus.RUNNING
             logger.info("Scenario %s is running for %s seconds", scenario.id,
                         scenario.config.duration_seconds)
             await asyncio.sleep(scenario.config.duration_seconds)
-
-            async with asyncio.timeout(self.PRODUCER_COMPLETION_TIMEOUT_SECONDS):
-                async with asyncio.TaskGroup() as producers:
-                    for container_id in scenario.container_ids_by_role["producer"]:
-                        producers.create_task(
-                            self.docker_service.wait_for_container_file(
-                                container_id, self.PRODUCER_COMPLETION_FILE
-                            )
-                        )
+            await self._wait_for_files(producers, self.PRODUCER_COMPLETION_FILE)
 
             scenario.status = ScenarioStatus.DRAINING
             scenario.drain_started_at = datetime.datetime.now(datetime.UTC)
@@ -333,8 +351,15 @@ class ScenarioService:
                 scenario.id,
                 scenario.config.drain_seconds,
             )
-            await asyncio.sleep(scenario.config.drain_seconds)
+            if synchronized:
+                await self._drain_rabbitmq(scenario, consumers)
+            else:
+                await asyncio.sleep(scenario.config.drain_seconds)
             scenario.status = ScenarioStatus.STOPPING
+            if synchronized:
+                scenario.final_metrics_collected = await self.result_service.wait_for_final_metrics(
+                    scenario.id, len(producers) + len(consumers), self.FINAL_SCRAPE_TIMEOUT_SECONDS,
+                )
             scenario.finished_at = datetime.datetime.now(datetime.UTC)
             await self._save_result(scenario, final_status=ScenarioStatus.FINISHED)
             await self.docker_service.clear_scenario_resources(scenario.id)
@@ -354,6 +379,60 @@ class ScenarioService:
             scenario.finished_at = datetime.datetime.now(datetime.UTC)
             await self._save_result(scenario, final_status=ScenarioStatus.ERROR)
             await self.docker_service.clear_scenario_resources(scenario.id)
+
+    @staticmethod
+    def _uses_synchronized_lifecycle(scenario: Scenario) -> bool:
+        return (
+            scenario.config.broker_config.broker_type is Brokers.RABBITMQ
+            and scenario.config.interaction_mode is InteractionMode.WORK_QUEUE
+        )
+
+    async def _wait_for_files(self, containers: list[str], path: str) -> None:
+        async with asyncio.timeout(self.PRODUCER_COMPLETION_TIMEOUT_SECONDS):
+            async with asyncio.TaskGroup() as tasks:
+                for container_id in containers:
+                    tasks.create_task(self.docker_service.wait_for_container_file(container_id, path))
+
+    async def _release_phase(self, producers: list[str], path: str) -> datetime.datetime:
+        release_at = time.time() + self.PHASE_RELEASE_LEAD_SECONDS
+        try:
+            async with asyncio.timeout(self.PHASE_RELEASE_LEAD_SECONDS):
+                async with asyncio.TaskGroup() as tasks:
+                    for container_id in producers:
+                        tasks.create_task(
+                            self.docker_service.write_container_file(
+                                container_id, path, str(release_at)
+                            )
+                        )
+        except TimeoutError as error:
+            raise RuntimeError(f"Could not release all producers in time for {path}") from error
+        await asyncio.sleep(max(0, release_at - time.time()))
+        return datetime.datetime.fromtimestamp(release_at, datetime.UTC)
+
+    async def _drain_rabbitmq(self, scenario: Scenario, consumers: list[str]) -> None:
+        await self._signal_consumers(consumers, "SIGUSR2")
+        scenario.drain_completed = False
+        broker_id = scenario.container_ids_by_role["broker"][0]
+        try:
+            async with asyncio.timeout(scenario.config.drain_seconds):
+                while True:
+                    scenario.drain_pending_messages = await self.docker_service.rabbitmq_queue_pending(
+                        broker_id, "scenario"
+                    )
+                    if scenario.drain_pending_messages == 0:
+                        # Allow deliveries already handed to the client to finish.
+                        await asyncio.sleep(0.25)
+                        scenario.drain_completed = True
+                        break
+                    await asyncio.sleep(0.25)
+        except TimeoutError:
+            logger.warning("Scenario %s reached its drain deadline", scenario.id)
+        await self._signal_consumers(consumers, "SIGUSR1")
+
+    async def _signal_consumers(self, consumers: list[str], signal: str) -> None:
+        async with asyncio.TaskGroup() as tasks:
+            for container_id in consumers:
+                tasks.create_task(self.docker_service.signal_container(container_id, signal))
 
     async def cancel_scenario(self, scenario: Scenario) -> None:
         """Cancel a scenario that has not been assigned a running task yet."""

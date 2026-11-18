@@ -2,6 +2,15 @@
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
+COMPONENT_METRICS_FINAL = Gauge(
+    "benchmark_component_metrics_final",
+    "Whether the client has stopped updating its benchmark metrics.",
+)
+CONSUMER_RECEIVED_AT_DRAIN = Gauge(
+    "benchmark_consumer_received_at_drain",
+    "Measured deliveries processed before the consumer received the drain signal.",
+)
+
 
 _PRODUCER_ACCEPTED = Counter(
     "benchmark_producer_messages_accepted_total",

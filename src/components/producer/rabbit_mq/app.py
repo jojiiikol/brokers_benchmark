@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 import time
 
 import aio_pika
@@ -16,8 +17,12 @@ from src.components.common.load_profile import (
 )
 from src.components.common.producer_metrics import ProducerMetrics, wait_for_result_collection
 from src.components.common.prometheus_metrics import (
+    COMPONENT_METRICS_FINAL,
     ProducerPrometheusMetrics,
     start_metrics_server,
+)
+from src.components.common.phase_control import (
+    MEASUREMENT_START, READY, WARMUP_DONE, WARMUP_START, wait_for_release,
 )
 from src.components.common.message_payload import build_message
 from src.logger.config import setup_logging
@@ -258,6 +263,7 @@ async def main():
     parser.add_argument("--producer-id", type=int, default=1)
     parser.add_argument("--result-retention-seconds", type=float, default=0)
     parser.add_argument("--completion-file")
+    parser.add_argument("--synchronized-producer-count", type=int)
     args = parser.parse_args()
     if args.payload_size <= 0:
         parser.error("--payload_size must be greater than zero")
@@ -290,12 +296,24 @@ async def main():
     try:
         await producer._connect()
         await producer.declare_topology()
-        await producer.run_benchmark(
-            warmup_seconds=args.warmup_seconds,
-            duration_seconds=args.duration_seconds,
-        )
+        if args.synchronized_producer_count is None:
+            await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
+        else:
+            Path(READY).touch()
+            await wait_for_release(WARMUP_START)
+            await producer.publish_for(args.warmup_seconds, phase="warmup")
+            Path(WARMUP_DONE).touch()
+            offset = (
+                (args.producer_id - 1) / (args.synchronized_producer_count * producer.TPS)
+                if scheduler.load_type is LoadType.CONSTANT and producer.TPS
+                else 0.0
+            )
+            await wait_for_release(MEASUREMENT_START, offset)
+            await producer.publish_for(args.duration_seconds - offset, phase="measurement")
     finally:
         await producer.close()
+    if args.synchronized_producer_count is not None:
+        COMPONENT_METRICS_FINAL.set(1)
     await wait_for_result_collection(args.completion_file, args.result_retention_seconds)
 
 

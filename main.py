@@ -43,24 +43,24 @@ async def main() -> None:
         await orchestrator.create_scenario(
             ScenarioConfig(
                 broker_config=BrokerConfig(
-                    broker_type=Brokers.RABBITMQ
+                    broker_type=Brokers.NATS_PULL
                 ),
                 consumer_config=ConsumerConfig(
                     count=1,
-                    cpu_limit=2.0,
-                    memory_limit_mib=None,
+                    cpu_limit=1,
+                    memory_limit_mib=1024,
                 ),
                 producer_config=ProducerConfig(
-                    load_type=LoadType.CONSTANT,
-                    payload_size=32,
-                    rps=200000,
+                    load_type=LoadType.MAX_THROUGHPUT,
+                    payload_size=16,
+                    rps=None,
                     # end_rps=1000000,
                     # step_duration_seconds=10,
                     guarantee_type=GuaranteeType.AT_LEAST_ONCE,
                     count=1,
-                    max_in_flight=1000,
-                    cpu_limit=3.0,
-                    memory_limit_mib=None,
+                    max_in_flight=64,
+                    cpu_limit=1,
+                    memory_limit_mib=1024,
                 ),
                 warmup_seconds=15,
                 duration_seconds=60,

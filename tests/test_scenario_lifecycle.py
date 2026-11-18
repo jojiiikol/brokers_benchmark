@@ -47,6 +47,7 @@ from src.scenario_service.dto.producer_config import (
 )
 from src.scenario_service.dto.scenario_config import ScenarioConfig
 from src.scenario_service.service import ScenarioService, ScenarioStatus
+from src.components.common.phase_control import MEASUREMENT_START, READY, WARMUP_DONE, WARMUP_START
 from src.orchestrator import Orchestrator
 from src.results.service import ScenarioResultService, _bounded_quantile
 
@@ -60,7 +61,17 @@ class FakeDockerService:
         return True
 
     async def wait_for_container_file(self, container_id, path):
-        self.events.append(("wait_for_completion", container_id))
+        self.events.append(("wait_for_file", container_id, path))
+
+    async def write_container_file(self, container_id, path, contents):
+        self.events.append(("release", container_id, path))
+
+    async def signal_container(self, container_id, signal):
+        self.events.append(("signal", container_id, signal))
+
+    async def rabbitmq_queue_pending(self, container_id, queue):
+        self.events.append(("queue_pending", container_id, queue))
+        return 0
 
     async def clear_scenario_resources(self, scenario_id):
         self.events.append(("cleanup", scenario_id))
@@ -69,6 +80,11 @@ class FakeDockerService:
 class FakeResultService:
     def __init__(self):
         self.saved = []
+        self.final_scrapes = []
+
+    async def wait_for_final_metrics(self, scenario_id, expected, timeout):
+        self.final_scrapes.append((scenario_id, expected))
+        return True
 
     async def save(self, scenario, final_status):
         self.saved.append((scenario.id, final_status))
@@ -117,7 +133,8 @@ class ScenarioLifecycleTests(unittest.IsolatedAsyncioTestCase):
             docker,
             result_service=result_service,
         )
-        scenario = await service.create_scenario(scenario_config())
+        service.PHASE_RELEASE_LEAD_SECONDS = 0.05
+        scenario = await service.create_scenario(scenario_config(drain_seconds=1))
         scenario.container_ids_by_role = {
             "broker": ["broker-1"],
             "consumer": ["consumer-1"],
@@ -129,6 +146,9 @@ class ScenarioLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scenario.status, ScenarioStatus.FINISHED)
         self.assertIsNotNone(scenario.started_at)
         self.assertIsNotNone(scenario.warmup_finished_at)
+        self.assertIsNotNone(scenario.measurement_started_at)
+        self.assertTrue(scenario.drain_completed)
+        self.assertTrue(scenario.final_metrics_collected)
         self.assertIsNotNone(scenario.drain_started_at)
         self.assertIsNotNone(scenario.finished_at)
         self.assertEqual(
@@ -137,17 +157,26 @@ class ScenarioLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 ("start", "broker-1"),
                 ("start", "consumer-1"),
                 ("start", "producer-1"),
-                ("wait_for_completion", "producer-1"),
+                ("wait_for_file", "producer-1", READY),
+                ("wait_for_file", "consumer-1", READY),
+                ("release", "producer-1", WARMUP_START),
+                ("wait_for_file", "producer-1", WARMUP_DONE),
+                ("release", "producer-1", MEASUREMENT_START),
+                ("wait_for_file", "producer-1", service.PRODUCER_COMPLETION_FILE),
+                ("signal", "consumer-1", "SIGUSR2"),
+                ("queue_pending", "broker-1", "scenario"),
+                ("signal", "consumer-1", "SIGUSR1"),
                 ("cleanup", scenario.id),
             ],
         )
         self.assertEqual(result_service.saved, [(scenario.id, "FINISHED")])
+        self.assertEqual(result_service.final_scrapes, [(scenario.id, 2)])
         self.assertEqual(scenario.result_path, f"/tmp/{scenario.id}.json")
 
     async def test_starts_drain_only_after_all_producers_finish(self):
         class Docker(FakeDockerService):
             async def wait_for_container_file(self, container_id, path):
-                if container_id == "slow-producer":
+                if container_id == "slow-producer" and path == service.PRODUCER_COMPLETION_FILE:
                     waiting.set()
                     await finished.wait()
 
@@ -155,7 +184,9 @@ class ScenarioLifecycleTests(unittest.IsolatedAsyncioTestCase):
         finished = asyncio.Event()
         results = FakeResultService()
         service = ScenarioService(Docker(), result_service=results)
+        service.PHASE_RELEASE_LEAD_SECONDS = 0.05
         scenario = await service.create_scenario(scenario_config())
+        scenario.container_ids_by_role["broker"] = ["broker-1"]
         scenario.container_ids_by_role["producer"] = ["fast-producer", "slow-producer"]
 
         async with asyncio.TaskGroup() as tasks:
@@ -170,6 +201,21 @@ class ScenarioLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(scenario.drain_started_at)
         self.assertEqual(results.saved, [(scenario.id, "FINISHED")])
+
+    async def test_drain_timeout_preserves_pending_count(self):
+        class Docker(FakeDockerService):
+            async def rabbitmq_queue_pending(self, container_id, queue):
+                return 17
+
+        service = ScenarioService(Docker(), result_service=FakeResultService())
+        scenario = await service.create_scenario(scenario_config(drain_seconds=0.01))
+        scenario.container_ids_by_role["broker"] = ["broker-1"]
+
+        await service._drain_rabbitmq(scenario, ["slow-consumer"])
+
+        self.assertFalse(scenario.drain_completed)
+        self.assertEqual(scenario.drain_pending_messages, 17)
+        self.assertEqual(service.docker_service.events[-1], ("signal", "slow-consumer", "SIGUSR1"))
 
     def test_rejects_invalid_stage_durations(self):
         with self.assertRaises(ValueError):
@@ -312,6 +358,28 @@ class ScenarioResultServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_bounded_quantile(0.49, 0.05, 0.18), 0.18)
         self.assertEqual(_bounded_quantile(0.10, 0.05, 0.18), 0.10)
         self.assertIsNone(_bounded_quantile(None, None, None))
+
+    async def test_incomplete_drain_is_not_reported_as_loss(self):
+        class Collector(FakeResultsCollector):
+            async def collect(self, scenario_id):
+                metrics = await super().collect(scenario_id)
+                metrics["reliability"] = {"lost_messages": 1, "lost_share_percent": 10}
+                return metrics
+
+            async def received_at_drain(self, scenario_id):
+                return 7
+
+        scenario = await ScenarioService(FakeDockerService()).create_scenario(scenario_config())
+        scenario.drain_completed = False
+        scenario.drain_pending_messages = 1
+        scenario.final_metrics_collected = True
+        with tempfile.TemporaryDirectory() as directory:
+            service = ScenarioResultService(directory=Path(directory), collector=Collector())
+            path = await service.save(scenario, final_status="FINISHED")
+            metrics = json.loads(path.read_text(encoding="utf-8"))["metrics"]
+        self.assertIsNone(metrics["reliability"]["lost_messages"])
+        self.assertEqual(metrics["drain"]["pending_at_last_check"], 1)
+        self.assertEqual(metrics["drain"]["late_deliveries"], 2)
 
 
 class ProducerPayloadTests(unittest.TestCase):

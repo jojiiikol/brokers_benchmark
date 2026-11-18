@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import logging
-import math
 import time
 
 from aiokafka import AIOKafkaConsumer
@@ -10,6 +9,13 @@ from src.logger.config import setup_logging
 from src.components.common.message_payload import (
     InvalidBenchmarkMessage,
     decode_message_metadata,
+)
+from src.components.common.consumer_latency import (
+    DEFAULT_LATENCY_SAMPLE_EVERY,
+    DEFAULT_METRICS_LOG_EVERY_WINDOWS,
+    DEFAULT_METRICS_WINDOW_SIZE,
+    LatencyMetrics,
+    add_consumer_latency_arguments,
 )
 from src.components.common.prometheus_metrics import (
     ConsumerPrometheusMetrics,
@@ -22,36 +28,6 @@ TOPIC_NAME = "scenario"
 logger = logging.getLogger("benchmark.consumer.kafka")
 
 
-class LatencyMetrics:
-    PERCENTILES = (50, 75, 95, 99)
-
-    def __init__(self) -> None:
-        self._values_ms: list[float] = []
-
-    def observe(self, latency_ms: float) -> None:
-        self._values_ms.append(latency_ms)
-
-    @property
-    def count(self) -> int:
-        return len(self._values_ms)
-
-    def summary(self) -> dict[str, float | int | None]:
-        result: dict[str, float | int | None] = {"count": len(self._values_ms)}
-        for percentile in self.PERCENTILES:
-            result[f"p{percentile}_ms"] = self._percentile(percentile)
-        return result
-
-    def _percentile(self, percentile: int) -> float | None:
-        if not self._values_ms:
-            return None
-        values = sorted(self._values_ms)
-        rank = (len(values) - 1) * percentile / 100
-        lower, upper = math.floor(rank), math.ceil(rank)
-        if lower == upper:
-            return values[lower]
-        return values[lower] + (values[upper] - values[lower]) * (rank - lower)
-
-
 class KafkaConsumer:
     def __init__(
             self,
@@ -59,9 +35,9 @@ class KafkaConsumer:
             broker_port: str,
             group_id: str,
             guarantee_type: str = "at_most_once",
-            metrics_window_size: int = 100,
-            latency_sample_every: int = 10,
-            metrics_log_every_windows: int = 10,
+            metrics_window_size: int = DEFAULT_METRICS_WINDOW_SIZE,
+            latency_sample_every: int = DEFAULT_LATENCY_SAMPLE_EVERY,
+            metrics_log_every_windows: int = DEFAULT_METRICS_LOG_EVERY_WINDOWS,
     ) -> None:
         if metrics_window_size <= 0:
             raise ValueError("metrics_window_size must be greater than zero")
@@ -180,9 +156,7 @@ async def main() -> None:
     parser.add_argument("--broker-host", required=True, help="Kafka broker host")
     parser.add_argument("--broker-port", default="9092", help="Kafka broker port")
     parser.add_argument("--group-id", required=True, help="Kafka consumer group")
-    parser.add_argument("--metrics-window-size", type=int, default=100)
-    parser.add_argument("--latency-sample-every", type=int, default=10)
-    parser.add_argument("--metrics-log-every-windows", type=int, default=10)
+    add_consumer_latency_arguments(parser)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
     args = parser.parse_args()

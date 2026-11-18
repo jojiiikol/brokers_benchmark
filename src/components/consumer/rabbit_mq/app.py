@@ -1,56 +1,34 @@
 import asyncio
 import logging
+from pathlib import Path
+import signal
 import time
 
 import aio_pika
 from aiormq import AMQPConnectionError
 from dotenv import load_dotenv
 import argparse
-import math
 from src.logger.config import setup_logging
 from src.components.common.message_payload import (
     InvalidBenchmarkMessage,
     decode_message_metadata,
 )
+from src.components.common.consumer_latency import (
+    DEFAULT_LATENCY_SAMPLE_EVERY,
+    DEFAULT_METRICS_LOG_EVERY_WINDOWS,
+    DEFAULT_METRICS_WINDOW_SIZE,
+    LatencyMetrics,
+    add_consumer_latency_arguments,
+)
 from src.components.common.prometheus_metrics import (
+    COMPONENT_METRICS_FINAL,
+    CONSUMER_RECEIVED_AT_DRAIN,
     ConsumerPrometheusMetrics,
     start_metrics_server,
 )
+from src.components.common.phase_control import READY
 load_dotenv()
 logger = logging.getLogger("benchmark.consumer.rabbitmq")
-
-
-class LatencyMetrics:
-    """In-memory percentile aggregation for one measurement phase."""
-
-    PERCENTILES = (50, 75, 95, 99)
-
-    def __init__(self) -> None:
-        self._values_ms: list[float] = []
-
-    def observe(self, latency_ms: float) -> None:
-        self._values_ms.append(latency_ms)
-
-    @property
-    def count(self) -> int:
-        return len(self._values_ms)
-
-    def summary(self) -> dict[str, float | int | None]:
-        result: dict[str, float | int | None] = {"count": len(self._values_ms)}
-        for percentile in self.PERCENTILES:
-            result[f"p{percentile}_ms"] = self._percentile(percentile)
-        return result
-
-    def _percentile(self, percentile: int) -> float | None:
-        if not self._values_ms:
-            return None
-        values = sorted(self._values_ms)
-        rank = (len(values) - 1) * percentile / 100
-        lower = math.floor(rank)
-        upper = math.ceil(rank)
-        if lower == upper:
-            return values[lower]
-        return values[lower] + (values[upper] - values[lower]) * (rank - lower)
 
 
 class Consumer:
@@ -64,9 +42,9 @@ class Consumer:
             broker_password: str = "guest",
             broker_host: str = "rabbit_mq",
             broker_port: str = "5672",
-            metrics_window_size: int = 100,
-            latency_sample_every: int = 10,
-            metrics_log_every_windows: int = 10,
+            metrics_window_size: int = DEFAULT_METRICS_WINDOW_SIZE,
+            latency_sample_every: int = DEFAULT_LATENCY_SAMPLE_EVERY,
+            metrics_log_every_windows: int = DEFAULT_METRICS_LOG_EVERY_WINDOWS,
             interaction_mode: str = "work_queue",
             guarantee_type: str = "at_most_once",
 
@@ -146,7 +124,7 @@ class Consumer:
             )
             logger.info("Declared RabbitMQ work queue %s", self.queue_name)
 
-    async def consume(self) -> None:
+    async def consume(self, ready_file: str | None = None) -> None:
         if self._channel is None or self._queue is None:
             raise RuntimeError("Consumer is not connected")
 
@@ -159,6 +137,8 @@ class Consumer:
         )
         try:
             async with self._queue.iterator(no_ack=no_ack) as queue_iter:
+                if ready_file is not None:
+                    Path(ready_file).touch()
                 async for message in queue_iter:
                     if no_ack:
                         self._observe_message(message.body)
@@ -245,12 +225,7 @@ async def main():
     parser.add_argument(
         "--broker-port", type=str, default="5672", required=False, help="RabbitMQ broker port"
     )
-    parser.add_argument(
-        "--metrics-window-size", type=int, default=1000,
-        help="Number of latency samples in one percentile window",
-    )
-    parser.add_argument("--latency-sample-every", type=int, default=10)
-    parser.add_argument("--metrics-log-every-windows", type=int, default=100)
+    add_consumer_latency_arguments(parser)
     parser.add_argument(
         "--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue",
         help="RabbitMQ delivery topology",
@@ -260,6 +235,7 @@ async def main():
         choices=("at_most_once", "at_least_once"),
         default="at_most_once",
     )
+    parser.add_argument("--synchronized", action="store_true")
     args = parser.parse_args()
 
     consumer = Consumer(
@@ -275,8 +251,37 @@ async def main():
     start_metrics_server()
     await consumer._connect()
     await consumer.declare_queue()
-    await consumer.consume(
+    if not args.synchronized:
+        await consumer.consume()
+        return
+
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    loop.add_signal_handler(signal.SIGUSR1, stop.set)
+    loop.add_signal_handler(
+        signal.SIGUSR2,
+        lambda: CONSUMER_RECEIVED_AT_DRAIN.set(consumer.measurement_messages_total),
     )
+    consuming = asyncio.create_task(consumer.consume(READY))
+    stopping = asyncio.create_task(stop.wait())
+    try:
+        done, _ = await asyncio.wait((consuming, stopping), return_when=asyncio.FIRST_COMPLETED)
+        if consuming in done:
+            await consuming
+            raise RuntimeError("RabbitMQ subscription ended before finalization")
+        consuming.cancel()
+        try:
+            await consuming
+        except asyncio.CancelledError:
+            pass
+        await consumer.close()
+        COMPONENT_METRICS_FINAL.set(1)
+        await asyncio.Event().wait()
+    finally:
+        consuming.cancel()
+        stopping.cancel()
+        loop.remove_signal_handler(signal.SIGUSR1)
+        loop.remove_signal_handler(signal.SIGUSR2)
 
 
 
