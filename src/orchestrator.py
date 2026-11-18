@@ -142,7 +142,7 @@ class Orchestrator:
             return scenario
 
 
-    async def _process(self) -> None:
+    async def _process(self, stop_when_complete: bool = False) -> None:
         while True:
             self._collect_finished_tasks()
             await self._notify_observer()
@@ -150,8 +150,22 @@ class Orchestrator:
             await self._initialize_scenario()
             await self.start_scenario()
 
+            if stop_when_complete and self._all_scenarios_complete:
+                logger.info("All submitted benchmark scenarios completed")
+                return
 
             await asyncio.sleep(3)
+
+    @property
+    def _all_scenarios_complete(self) -> bool:
+        return bool(self.scenario_storage) and not self.scenario_tasks and all(
+            scenario.status in {
+                ScenarioStatus.CANCELLED,
+                ScenarioStatus.ERROR,
+                ScenarioStatus.FINISHED,
+            }
+            for scenario in self.scenario_storage
+        )
 
     async def _notify_observer(self) -> None:
         if self._observer is None:
@@ -177,8 +191,8 @@ class Orchestrator:
             except Exception:
                 logger.exception("Scenario %s task failed", scenario_id)
 
-    async def shutdown(self) -> None:
-        """Stop active scenario tasks and remove all dynamic Docker resources."""
+    async def shutdown(self, clear_all_resources: bool = True) -> None:
+        """Stop active tasks and remove global or orchestrator-owned resources."""
         if self._shutdown_complete:
             return
 
@@ -191,12 +205,26 @@ class Orchestrator:
         self.scenario_tasks.clear()
         await self._notify_observer()
 
-        await self.docker_service.clear_resources()
+        if clear_all_resources:
+            await self.docker_service.clear_resources()
+        else:
+            await asyncio.gather(*(
+                self.docker_service.clear_scenario_resources(scenario.id)
+                for scenario in self.scenario_storage
+            ))
         self._shutdown_complete = True
         logger.info("Dynamic benchmark resources were cleaned up")
 
-    async def run(self, stop_event: asyncio.Event | None = None) -> None:
-        task = asyncio.create_task(self._process(), name="orchestrator-process")
+    async def run(
+            self,
+            stop_event: asyncio.Event | None = None,
+            stop_when_complete: bool = False,
+            clear_all_resources_on_shutdown: bool = True,
+    ) -> None:
+        task = asyncio.create_task(
+            self._process(stop_when_complete=stop_when_complete),
+            name="orchestrator-process",
+        )
         stop_task = (
             asyncio.create_task(stop_event.wait(), name="orchestrator-stop-wait")
             if stop_event is not None
@@ -215,7 +243,9 @@ class Orchestrator:
                 logger.info("Shutdown signal received")
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-                await self.shutdown()
+                await self.shutdown(
+                    clear_all_resources=clear_all_resources_on_shutdown
+                )
                 return
 
             await task

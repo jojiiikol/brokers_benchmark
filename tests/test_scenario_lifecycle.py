@@ -227,6 +227,20 @@ class ScenarioLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class OrchestratorShutdownTests(unittest.IsolatedAsyncioTestCase):
+    def test_recognizes_when_every_submitted_scenario_is_terminal(self):
+        orchestrator = Orchestrator()
+        finished = type("ScenarioStub", (), {"status": ScenarioStatus.FINISHED})()
+        failed = type("ScenarioStub", (), {"status": ScenarioStatus.ERROR})()
+        cancelled = type(
+            "ScenarioStub", (), {"status": ScenarioStatus.CANCELLED}
+        )()
+        orchestrator.scenario_storage = [finished, failed, cancelled]
+
+        self.assertTrue(orchestrator._all_scenarios_complete)
+
+        orchestrator.scenario_tasks["still-running"] = object()
+        self.assertFalse(orchestrator._all_scenarios_complete)
+
     async def test_shutdown_cancels_scenarios_and_cleans_dynamic_resources(self):
         class Docker:
             def __init__(self):
@@ -249,6 +263,25 @@ class OrchestratorShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.cancelled())
         self.assertTrue(docker.cleaned)
         self.assertEqual(orchestrator.scenario_tasks, {})
+
+    async def test_scoped_shutdown_only_cleans_owned_scenarios(self):
+        class Docker:
+            def __init__(self):
+                self.cleaned_scenarios = []
+
+            async def clear_scenario_resources(self, scenario_id):
+                self.cleaned_scenarios.append(scenario_id)
+
+        orchestrator = Orchestrator()
+        docker = Docker()
+        orchestrator.docker_service = docker
+        orchestrator.scenario_storage = [
+            type("ScenarioStub", (), {"id": "owned-scenario"})(),
+        ]
+
+        await orchestrator.shutdown(clear_all_resources=False)
+
+        self.assertEqual(docker.cleaned_scenarios, ["owned-scenario"])
 
     async def test_stops_one_queued_scenario_without_global_cleanup(self):
         class ScenarioService:

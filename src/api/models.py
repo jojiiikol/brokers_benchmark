@@ -87,4 +87,3 @@ class ScenarioResponse(ApiModel):
             drain_started_at=scenario.drain_started_at,
             finished_at=scenario.finished_at,
         )
-
