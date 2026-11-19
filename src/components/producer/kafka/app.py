@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 import time
+from src.components.common.phase_control import synchronized_producer
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
@@ -184,6 +185,7 @@ async def main() -> None:
     parser.add_argument("--producer-id", type=int, default=1)
     parser.add_argument("--result-retention-seconds", type=float, default=0)
     parser.add_argument("--completion-file")
+    parser.add_argument("--synchronized-producer-count", type=int)
     args = parser.parse_args()
     if args.warmup_seconds < 0:
         parser.error("--warmup-seconds must be greater than or equal to zero")
@@ -212,7 +214,7 @@ async def main() -> None:
     start_metrics_server()
     try:
         await producer.connect()
-        await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
+        await synchronized_producer(producer, args)
     finally:
         await producer.close()
     await wait_for_result_collection(args.completion_file, args.result_retention_seconds)

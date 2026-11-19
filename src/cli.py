@@ -2,6 +2,9 @@
 
 import argparse
 import asyncio
+import json
+import sys
+from pathlib import Path
 from collections.abc import Sequence
 
 from src.benchmark_runtime import run_scenario
@@ -152,12 +155,50 @@ def _values(enum_type: type) -> tuple[str, ...]:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    scenario_config = parse_scenario_config(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "experiments":
+        experiments_main(arguments[1:])
+        return
+    scenario_config = parse_scenario_config(arguments)
     asyncio.run(run_scenario(
         scenario_config,
         stop_when_complete=True,
         cleanup_all_resources=False,
     ))
+
+
+def experiments_main(argv):
+    """Remote series commands share the server's scheduler and limits."""
+    import httpx
+    parser = argparse.ArgumentParser(prog="benchmark experiments")
+    parser.add_argument("--api-url", default="http://localhost:8080")
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name in ("plan", "run"):
+        commands.add_parser(name).add_argument("--file", type=Path, required=True)
+    for name in ("status", "cancel", "resume", "retry-failed", "results"):
+        commands.add_parser(name).add_argument("experiment_id")
+    analysis = commands.add_parser("analyze").add_mutually_exclusive_group(required=True)
+    analysis.add_argument("--directory", type=Path, help="Offline analysis without Docker, API or Prometheus.")
+    analysis.add_argument("--experiment-id")
+    args = parser.parse_args(argv)
+    if args.command == "analyze" and args.directory:
+        from src.experiments.service import analyze_directory
+        print(json.dumps(analyze_directory(args.directory), ensure_ascii=False, indent=2))
+        return
+    base = args.api_url.rstrip("/") + "/api/v1/experiments"
+    try:
+        with httpx.Client(timeout=120) as client:
+            if args.command in ("plan", "run"):
+                body = json.loads(args.file.read_text(encoding="utf-8"))
+                response = client.post(base + ("/plan" if args.command == "plan" else ""), json=body)
+            elif args.command in ("status", "results"):
+                response = client.get(f"{base}/{args.experiment_id}" + ("/results" if args.command == "results" else ""))
+            else:
+                response = client.post(f"{base}/{args.experiment_id}/{args.command}")
+            response.raise_for_status()
+            print(json.dumps(response.json(), ensure_ascii=False, indent=2))
+    except (OSError, ValueError, httpx.HTTPError) as error:
+        parser.exit(1, f"{error}\n")
 
 
 if __name__ == "__main__":

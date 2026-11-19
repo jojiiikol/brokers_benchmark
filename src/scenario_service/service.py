@@ -72,6 +72,7 @@ class Scenario:
     started_at: datetime.datetime | None = None
     warmup_finished_at: datetime.datetime | None = None
     measurement_started_at: datetime.datetime | None = None
+    measurement_finished_at: datetime.datetime | None = None
     drain_started_at: datetime.datetime | None = None
     drain_pending_messages: int | None = None
     drain_completed: bool | None = None
@@ -83,7 +84,6 @@ class Scenario:
     )
 
 class ScenarioService:
-    MAX_RUNNING_SCENARIO_COUNT: int = 5
     TIMEOUT_SCENARIO_SECONDS: int = 45
     PRODUCER_COMPLETION_TIMEOUT_SECONDS: int = 60
     PRODUCER_COMPLETION_FILE = "/tmp/benchmark-publishing-finished"
@@ -203,11 +203,14 @@ class ScenarioService:
             consumer_args = [
                 "--broker-host", broker_hostname,
                 "--broker-port", str(self._broker_port(scenario.config.broker_config.broker_type)),
+                "--duration-seconds", str(scenario.config.duration_seconds),
                 *broker_creator.interaction_mode_args(scenario.config.interaction_mode),
                 "--guarantee-type", scenario.config.producer_config.guarantee_type.value,
             ]
             if self._uses_synchronized_lifecycle(scenario):
                 consumer_args.append("--synchronized")
+            if scenario.config.producer_config.load_type is LoadType.LINEAR:
+                consumer_args.extend(("--load-step-duration-seconds", str(scenario.config.producer_config.step_duration_seconds)))
 
             consumer_containers = await consumer_creator.configurate(
                 scenario_id=scenario_id,
@@ -289,9 +292,10 @@ class ScenarioService:
     async def create_scenario(
             self,
             scenario_config: ScenarioConfig,
+            *, scenario_id: str | None = None,
     ) -> Scenario:
 
-        scenario_id = str(uuid.uuid4())
+        scenario_id = scenario_id or str(uuid.uuid4())
         scenario = Scenario(
             id=scenario_id,
             name="scenario - {}".format(scenario_id),
@@ -334,7 +338,7 @@ class ScenarioService:
 
             if synchronized:
                 scenario.measurement_started_at = await self._release_phase(
-                    producers, MEASUREMENT_START
+                    producers + consumers, MEASUREMENT_START
                 )
             else:
                 scenario.measurement_started_at = scenario.warmup_finished_at
@@ -342,6 +346,8 @@ class ScenarioService:
             logger.info("Scenario %s is running for %s seconds", scenario.id,
                         scenario.config.duration_seconds)
             await asyncio.sleep(scenario.config.duration_seconds)
+            scenario.measurement_finished_at = scenario.measurement_started_at + datetime.timedelta(
+                seconds=scenario.config.duration_seconds)
             await self._wait_for_files(producers, self.PRODUCER_COMPLETION_FILE)
 
             scenario.status = ScenarioStatus.DRAINING
@@ -351,10 +357,13 @@ class ScenarioService:
                 scenario.id,
                 scenario.config.drain_seconds,
             )
-            if synchronized:
+            if (scenario.config.broker_config.broker_type is Brokers.RABBITMQ
+                    and scenario.config.interaction_mode is InteractionMode.WORK_QUEUE):
                 await self._drain_rabbitmq(scenario, consumers)
             else:
+                await self._signal_consumers(consumers, "SIGUSR2")
                 await asyncio.sleep(scenario.config.drain_seconds)
+                await self._signal_consumers(consumers, "SIGUSR1")
             scenario.status = ScenarioStatus.STOPPING
             if synchronized:
                 scenario.final_metrics_collected = await self.result_service.wait_for_final_metrics(
@@ -382,10 +391,7 @@ class ScenarioService:
 
     @staticmethod
     def _uses_synchronized_lifecycle(scenario: Scenario) -> bool:
-        return (
-            scenario.config.broker_config.broker_type is Brokers.RABBITMQ
-            and scenario.config.interaction_mode is InteractionMode.WORK_QUEUE
-        )
+        return True
 
     async def _wait_for_files(self, containers: list[str], path: str) -> None:
         async with asyncio.timeout(self.PRODUCER_COMPLETION_TIMEOUT_SECONDS):

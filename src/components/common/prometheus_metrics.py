@@ -10,6 +10,16 @@ CONSUMER_RECEIVED_AT_DRAIN = Gauge(
     "benchmark_consumer_received_at_drain",
     "Measured deliveries processed before the consumer received the drain signal.",
 )
+MEASUREMENT_END_MESSAGES = Gauge("benchmark_measurement_end_messages", "Message count at the measurement deadline.")
+MEASUREMENT_END_BYTES = Gauge("benchmark_measurement_end_payload_bytes", "Payload bytes at the measurement deadline.")
+MEASUREMENT_SNAPSHOT_LATENESS = Gauge("benchmark_measurement_snapshot_lateness_seconds", "Timer delay at the measurement deadline.")
+MEASUREMENT_SNAPSHOT_COMPLETE = Gauge("benchmark_measurement_snapshot_complete", "Whether the measurement-deadline counters were captured.")
+STEP_MESSAGES = Gauge("benchmark_measurement_step_messages", "Messages processed within one load step.", ("step",))
+STEP_BYTES = Gauge("benchmark_measurement_step_payload_bytes", "Payload bytes within one load step.", ("step",))
+STEP_LATENESS = Gauge("benchmark_measurement_step_lateness_seconds", "Snapshot delay at a load step boundary.", ("step",))
+STEP_LATENCY_BUCKET = Gauge("benchmark_measurement_step_latency_bucket", "Latency histogram within one load step.", ("step", "le"))
+STEP_LATENCY_SUM = Gauge("benchmark_measurement_step_latency_sum", "Sum of sampled latency within one load step.", ("step",))
+STEP_LATENCY_COUNT = Gauge("benchmark_measurement_step_latency_count", "Sampled messages within one load step.", ("step",))
 
 
 _PRODUCER_ACCEPTED = Counter(
@@ -111,6 +121,11 @@ class ConsumerPrometheusMetrics:
 
     def received(self, phase: str) -> None:
         self._received[phase].inc()
+
+    def snapshot_latency(self):
+        samples = next(iter(self._latency.collect())).samples
+        return {("bucket", sample.labels["le"]) if "le" in sample.labels else (sample.name.rsplit("_", 1)[-1], ""): sample.value
+                for sample in samples if sample.name.endswith(("_bucket", "_sum", "_count"))}
 
     def duplicate(self, phase: str) -> None:
         self._duplicates[phase].inc()

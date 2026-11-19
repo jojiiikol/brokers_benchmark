@@ -107,8 +107,47 @@ class PrometheusScenarioResultsCollector:
 
     async def received_at_drain(self, scenario_id: str) -> int | None:
         return _as_int(await self._query(
-            f'sum(benchmark_consumer_received_at_drain{{scenario_id="{scenario_id}",component="consumer"}})'
+            f'sum(benchmark_measurement_end_messages{{scenario_id="{scenario_id}",component="consumer"}})'
         ))
+
+    async def boundary_rates(self, scenario, step_index=None):
+        selector = f'scenario_id="{scenario.id}"'
+        is_step = step_index is not None
+        if is_step:
+            selector += f',step="{step_index}"'
+        message_metric = "benchmark_measurement_step_messages" if is_step else "benchmark_measurement_end_messages"
+        byte_metric = "benchmark_measurement_step_payload_bytes" if is_step else "benchmark_measurement_end_payload_bytes"
+        complete_metric = message_metric if is_step else "benchmark_measurement_snapshot_complete"
+        lateness_metric = "benchmark_measurement_step_lateness_seconds" if is_step else "benchmark_measurement_snapshot_lateness_seconds"
+        def query(metric, role, function="sum"):
+            return f'{function}({metric}{{{selector},component="{role}"}})'
+        producer_count, consumer_count, sent, received, payload, lateness = await asyncio.gather(
+            self._query(f'count({complete_metric}{{{selector},component="producer"}}' + (')' if is_step else ' == 1)')),
+            self._query(f'count({complete_metric}{{{selector},component="consumer"}}' + (')' if is_step else ' == 1)')),
+            self._query(query(message_metric, "producer")),
+            self._query(query(message_metric, "consumer")),
+            self._query(query(byte_metric, "producer")),
+            self._query(f'max({lateness_metric}{{{selector}}})'),
+        )
+        duration = scenario.config.producer_config.step_duration_seconds if is_step else scenario.config.duration_seconds
+        producer_ok = producer_count == scenario.config.producer_config.count
+        consumer_ok = consumer_count == scenario.config.consumer_config.count
+        return dict(producer_messages_per_second=sent/duration if producer_ok and sent is not None else None,
+                    consumer_messages_per_second=received/duration if consumer_ok and received is not None else None,
+                    producer_payload_bytes_per_second=payload/duration if producer_ok and payload is not None else None,
+                    consumer_payload_bytes_per_second=(received*scenario.config.producer_config.payload_size*1024/duration
+                                                       if consumer_ok and received is not None else None)), lateness
+
+    async def step_latency(self, scenario_id, index):
+        selector = f'scenario_id="{scenario_id}",step="{index}"'
+        count, total, *quantiles = await asyncio.gather(
+            self._query(f'sum(benchmark_measurement_step_latency_count{{{selector}}})'),
+            self._query(f'sum(benchmark_measurement_step_latency_sum{{{selector}}})'),
+            *(self._query(f'histogram_quantile({q/100}, sum by (le) (benchmark_measurement_step_latency_bucket{{{selector}}}))')
+              for q in (50,75,95,99)),
+        )
+        return dict(samples=_as_int(count), average=total/count if count and total is not None else None,
+                    **dict(zip(("p50","p75","p95","p99"),quantiles)))
 
     async def _query(self, query: str) -> float | None:
         try:
@@ -129,6 +168,49 @@ class PrometheusScenarioResultsCollector:
             logger.warning("Could not collect scenario results from Prometheus")
             return None
 
+    async def _range(self, query: str, start: float, end: float):
+        try:
+            response = await asyncio.to_thread(
+                requests.get, f"{self._base_url}/api/v1/query_range",
+                params=dict(query=query, start=start, end=end, step=5),
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("status") != "success":
+                return []
+            return payload.get("data", {}).get("result", [])
+        except (requests.RequestException, ValueError, KeyError):
+            logger.warning("Could not collect measurement interval from Prometheus")
+            return []
+
+    async def interval(self, scenario_id: str, start: float, end: float):
+        """Scrape-resolution estimates; never substitute missing samples with zero."""
+        selector = f'scenario_id="{scenario_id}"'
+        cpu, memory = await asyncio.gather(
+            self._range(f'sum by (component) (benchmark_container_cpu_seconds{{{selector}}})', start, end),
+            self._range(f'sum by (component) (benchmark_container_memory_bytes{{{selector}}})', start, end),
+        )
+        resources = {role: dict(cpu_cores_average=None, cpu_cores_maximum=None,
+                                memory_bytes_average=None, memory_bytes_maximum=None)
+                     for role in ("broker", "producer", "consumer")}
+        for series in cpu:
+            role = series.get("metric", {}).get("component")
+            points = _finite_points(series.get("values", []))
+            slopes = [(b[1]-a[1])/(b[0]-a[0]) for a,b in zip(points, points[1:])
+                      if b[0] > a[0] and b[1] >= a[1]]
+            if role in resources and slopes:
+                resources[role].update(cpu_cores_average=(points[-1][1]-points[0][1])/(points[-1][0]-points[0][0]),
+                                       cpu_cores_maximum=max(slopes))
+        for series in memory:
+            role = series.get("metric", {}).get("component")
+            points = _finite_points(series.get("values", []))
+            if role in resources and len(points) > 1:
+                weighted = sum((b[0]-a[0]) * a[1] for a,b in zip(points, points[1:]))
+                resources[role].update(memory_bytes_average=weighted/(points[-1][0]-points[0][0]),
+                                       memory_bytes_maximum=max(v for _,v in points))
+        return dict(resources=resources)
+
 
 class ScenarioResultService:
     """Write one durable JSON result file per completed experiment."""
@@ -148,6 +230,64 @@ class ScenarioResultService:
 
     async def save(self, scenario: Any, final_status: str) -> Path:
         metrics = await self._collector.collect(scenario.id)
+        measurement_start = scenario.measurement_started_at
+        measurement_end = getattr(scenario, "measurement_finished_at", None)
+        if measurement_start and measurement_end and hasattr(self._collector, "interval"):
+            interval = await self._collector.interval(scenario.id, measurement_start.timestamp(), measurement_end.timestamp())
+            metrics.update(interval)
+            if scenario.config.producer_config.load_type.value == "linear":
+                producer = scenario.config.producer_config
+                step = producer.step_duration_seconds
+                count = round(scenario.config.duration_seconds / step)
+                metrics["steps"] = []
+                for index in range(count):
+                    start = measurement_start.timestamp() + index*step
+                    step_metrics = await self._collector.interval(scenario.id, start, start+step)
+                    step_metrics["rates"], lateness = await self._collector.boundary_rates(scenario, index)
+                    step_metrics["latency_seconds"] = await self._collector.step_latency(scenario.id, index)
+                    metrics["steps"].append(dict(index=index, target_rps_per_producer=round(
+                        producer.rps+(producer.end_rps-producer.rps)*index/(count-1)),
+                        started_at=start, ended_at=start+step,
+                        snapshot_lateness_seconds=lateness, metrics=step_metrics))
+        quality = dict(final_metrics_collected=scenario.final_metrics_collected is True,
+                       interval_source="prometheus_scrape_resolution", excluded_metrics={}, warnings=[])
+        metrics["quality"] = quality
+        for index, step in enumerate(metrics.get("steps", [])):
+            if (step.get("snapshot_lateness_seconds") or 0) > .1:
+                for section in ("rates", "latency_seconds"):
+                    for metric in step["metrics"][section]:
+                        quality["excluded_metrics"][f"step_{index}.{section}.{metric}"] = "measurement_boundary_timer_delayed"
+        if hasattr(self._collector, "boundary_rates") and measurement_end:
+            metrics["rates"], lateness = await self._collector.boundary_rates(scenario)
+            quality.update(rates_source="measurement_deadline_snapshot", snapshot_lateness_seconds=lateness)
+            if lateness is not None and lateness > .1:
+                quality["warnings"].append("measurement_boundary_timer_delayed")
+                for metric in metrics["rates"]:
+                    quality["excluded_metrics"][f"rates.{metric}"] = "measurement_boundary_timer_delayed"
+        accepted = metrics.get("messages", {}).get("producer_accepted")
+        received = metrics.get("messages", {}).get("consumer_received")
+        duplicates = metrics.get("messages", {}).get("consumer_duplicates")
+        expected = (accepted * scenario.config.consumer_config.count
+                    if accepted is not None and scenario.config.interaction_mode is InteractionMode.PUB_SUB else accepted)
+        accounting_complete = (expected is not None and received is not None and duplicates is not None
+                               and received-duplicates >= expected)
+        if scenario.drain_completed is None:
+            quality["delivery_accounting_complete"] = accounting_complete
+            metrics["late_deliveries"] = None
+            if scenario.final_metrics_collected and hasattr(self._collector, "received_at_drain"):
+                before = await self._collector.received_at_drain(scenario.id)
+                metrics["late_deliveries"] = received-before if received is not None and before is not None else None
+        if not accounting_complete and scenario.drain_completed is not True:
+            for key in ("lost_messages", "lost_share_percent"):
+                quality["excluded_metrics"][f"reliability.{key}"] = "delivery_accounting_incomplete"
+                if "reliability" in metrics:
+                    metrics["reliability"][key] = None
+        target = scenario.config.producer_config.rps
+        if scenario.config.producer_config.load_type.value == "linear":
+            target = (target + scenario.config.producer_config.end_rps)/2
+        actual = metrics.get("rates", {}).get("producer_messages_per_second")
+        if target and actual is not None and actual < target*scenario.config.producer_config.count*.95:
+            quality["warnings"].append("target_rps_not_reached")
         if scenario.config.interaction_mode is InteractionMode.PUB_SUB:
             messages = metrics["messages"]
             sent = messages.get("producer_accepted")
@@ -190,24 +330,38 @@ class ScenarioResultService:
                 "started_at": _serialize(scenario.started_at),
                 "warmup_finished_at": _serialize(scenario.warmup_finished_at),
                 "measurement_started_at": _serialize(scenario.measurement_started_at),
+                "measurement_finished_at": _serialize(measurement_end),
                 "drain_started_at": _serialize(scenario.drain_started_at),
                 "finished_at": _serialize(scenario.finished_at),
                 "configuration": _serialize(scenario.config),
             },
             "metrics": metrics,
         }
+        for metric in quality["excluded_metrics"]:
+            if metric.startswith("reliability."):
+                metrics.get("reliability", {})[metric.split(".", 1)[1]] = None
+        if getattr(scenario, "experiment", None):
+            artifact["experiment"] = scenario.experiment
         self._directory.mkdir(parents=True, exist_ok=True)
         path = self._directory / f"scenario-{scenario.id}.json"
-        path.write_text(
-            json.dumps(artifact, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        from src.experiments.storage import atomic_json
+        atomic_json(path, artifact)
         logger.info("Saved scenario result to %s", path)
         return path
 
 
 def _as_int(value: float | None) -> int | None:
     return None if value is None else int(value)
+
+
+def _finite_points(values):
+    points = []
+    for timestamp, value in values:
+        number = float(value)
+        if math.isfinite(number):
+            points.append((float(timestamp), number))
+    return points
+
 
 
 def _bounded_quantile(

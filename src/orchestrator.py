@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import datetime
 from typing import Protocol
 
 from src.docker_service.docker_sdk import SdkDockerService
@@ -16,15 +18,20 @@ class ScenarioObserver(Protocol):
 
 
 class Orchestrator:
-    MAX_RUNNING_SCENARIO_COUNT: int = 5
-
-    def __init__(self, observer: ScenarioObserver | None = None):
+    def __init__(self, observer: ScenarioObserver | None = None,
+                 max_concurrent_scenarios: int | None = None):
+        limit = (int(os.getenv("MAX_CONCURRENT_SCENARIOS", "1"))
+                 if max_concurrent_scenarios is None else max_concurrent_scenarios)
+        if type(limit) is not int or limit < 1:
+            raise ValueError("max_concurrent_scenarios must be a positive integer")
+        self.max_concurrent_scenarios = limit
         self.docker_service = SdkDockerService()
         self.scenario_service = ScenarioService(self.docker_service)
         self.scenario_storage: list = []
         self.scenario_tasks: dict[str, asyncio.Task] = {}
         self._shutdown_complete = False
         self._observer = observer
+        self.experiment_provider = None
 
         self.create_image_lock = asyncio.Lock()
         self._scenario_operation_lock = asyncio.Lock()
@@ -62,7 +69,7 @@ class Orchestrator:
 
     @property
     def _check_run_available(self) -> bool:
-        return self.scenario_running_count < ScenarioService.MAX_RUNNING_SCENARIO_COUNT
+        return len(self.scenario_tasks) < self.max_concurrent_scenarios
 
     def get_info(self):
         full_text = []
@@ -74,9 +81,11 @@ class Orchestrator:
 
     async def create_scenario(
             self,
-            scenario_config: ScenarioConfig
+            scenario_config: ScenarioConfig,
+            *, metadata: dict | None = None, scenario_id: str | None = None,
     ) -> str:
-        scenario = await self.scenario_service.create_scenario(scenario_config)
+        scenario = await self.scenario_service.create_scenario(scenario_config, scenario_id=scenario_id)
+        scenario.experiment = metadata
         self.scenario_storage.append(scenario)
         await self._notify_observer()
         return scenario.id
@@ -99,26 +108,44 @@ class Orchestrator:
             if not self._check_run_available:
                 return
 
-            older_scenario = self._get_older_scenario(ScenarioStatus.PENDING)
+            older_scenario = self._get_older_scenario(ScenarioStatus.CREATED)
+            if older_scenario is None:
+                older_scenario = self._get_older_scenario(ScenarioStatus.PENDING)
             if older_scenario is None:
                 return
 
             task = asyncio.create_task(
-                self.scenario_service.start_scenario(older_scenario),
+                self._run_reserved_scenario(older_scenario),
                 name=f"scenario-{older_scenario.id}",
             )
             self.scenario_tasks[older_scenario.id] = task
+            older_scenario.reserved_at = datetime.datetime.now(datetime.UTC).isoformat()
+            older_scenario.overlapping_scenario_ids = [sid for sid in self.scenario_tasks if sid != older_scenario.id]
+            for sid in older_scenario.overlapping_scenario_ids:
+                other = self.get_scenario(sid)
+                if other is not None:
+                    other.overlapping_scenario_ids = getattr(other, "overlapping_scenario_ids", []) + [older_scenario.id]
+            older_scenario.status = ScenarioStatus.INITIALIZING
             return older_scenario.id
 
-    async def _initialize_scenario(self):
-        async with self._scenario_operation_lock:
+    async def _run_reserved_scenario(self, scenario):
+        try:
             async with self.create_image_lock:
-                older = self._get_older_scenario(ScenarioStatus.CREATED)
-                if older is None:
-                    logger.info("Not new scenario")
-                    return
-
-                await self.scenario_service.initialize_scenario(older)
+                await self.scenario_service.initialize_scenario(scenario)
+            if scenario.status is not ScenarioStatus.ERROR:
+                await self.scenario_service.start_scenario(scenario)
+        except asyncio.CancelledError:
+            if scenario.status is not ScenarioStatus.CANCELLED:
+                await self.docker_service.clear_scenario_resources(scenario.id)
+                scenario.status = ScenarioStatus.CANCELLED
+            raise
+        except Exception as error:
+            logger.exception("Scenario worker failed: %s", scenario.id)
+            scenario.error = str(error)
+            scenario.status = ScenarioStatus.ERROR
+            await self.docker_service.clear_scenario_resources(scenario.id)
+        finally:
+            scenario.released_at = datetime.datetime.now(datetime.UTC).isoformat()
 
     async def stop_scenario(self, scenario_id: str) -> Scenario | None:
         """Stop one scenario and clean only the Docker resources it owns."""
@@ -147,8 +174,9 @@ class Orchestrator:
             self._collect_finished_tasks()
             await self._notify_observer()
             logger.info(self.get_info())
-            await self._initialize_scenario()
-            await self.start_scenario()
+            while self._check_run_available:
+                if await self.start_scenario() is None:
+                    break
 
             if stop_when_complete and self._all_scenarios_complete:
                 logger.info("All submitted benchmark scenarios completed")
@@ -175,6 +203,11 @@ class Orchestrator:
                 self.scenario_storage,
                 active_task_count=len(self.scenario_tasks),
             )
+            if hasattr(self._observer, "update_experiments"):
+                self._observer.update_experiments(
+                    list(self.experiment_provider().values()) if self.experiment_provider else [],
+                    self.max_concurrent_scenarios,
+                )
         except Exception:
             # Observability must never prevent a benchmark from running.
             logger.exception("Scenario observer update failed")

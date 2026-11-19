@@ -7,6 +7,7 @@ services:
       - ./results:/app/results
     environment:
       OBSERVABILITY_NETWORK: brokers_benchmark_observability
+      MAX_CONCURRENT_SCENARIOS: ${MAX_CONCURRENT_SCENARIOS:-1}
     expose:
       - "8000"
     ports:

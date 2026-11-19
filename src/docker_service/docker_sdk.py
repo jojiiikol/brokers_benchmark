@@ -247,21 +247,23 @@ class SdkDockerService:
             resource_collection=self.client.containers,
             labels={"namespace": CONTAINERS_NAMESPACE},
         )
-        result = []
-        for container in containers:
+        async def collect(container):
             try:
                 details = await container.show()
                 labels = details.get("Config", {}).get("Labels", {}) or {}
                 scenario_id = labels.get("scenario_id")
                 component = labels.get("component")
                 if not scenario_id or not component:
-                    continue
+                    return None
 
                 stats = await container.stats(stream=False)
                 # aiodocker returns a one-item list for a non-streaming stats
                 # request; the Docker API payload itself is that first item.
                 if isinstance(stats, list):
                     stats = stats[0] if stats else {}
+                if ("total_usage" not in stats.get("cpu_stats", {}).get("cpu_usage", {})
+                        or "usage" not in stats.get("memory_stats", {})):
+                    return None
                 networks = stats.get("networks", {}) or {}
                 network_received = sum(
                     interface.get("rx_bytes", 0) for interface in networks.values()
@@ -279,7 +281,7 @@ class SdkDockerService:
                     )
                     if item.get("op") == "Write"
                 )
-                result.append({
+                return {
                     "scenario_id": scenario_id,
                     "component": component,
                     "container_name": details.get("Name", container.id).lstrip("/"),
@@ -290,10 +292,14 @@ class SdkDockerService:
                     "network_received_bytes": network_received,
                     "network_transmitted_bytes": network_transmitted,
                     "disk_written_bytes": disk_written,
-                })
+                }
+            except DockerError as error:
+                if error.status != 404:
+                    logger.warning("Container stats unavailable for %s: %s", container.id, error)
             except Exception:
                 logger.exception("Failed to collect stats for container %s", container.id)
-        return result
+        snapshots = await asyncio.gather(*(collect(c) for c in containers))
+        return [snapshot for snapshot in snapshots if snapshot is not None]
 
     def _create_build_context(self, context_path: pathlib.Path) -> io.BytesIO:
         archive = io.BytesIO()
@@ -333,7 +339,15 @@ class SdkDockerService:
             return None
 
         if path is None:
-            image =  await self.pull_image(tag)
+            # Repeated runs must not depend on registry availability, or change
+            # a mutable image halfway through one experimental series.
+            try:
+                await self.client.images.inspect(tag)
+                image = tag
+            except DockerError as error:
+                if error.status != 404:
+                    raise
+                image = await self.pull_image(tag)
         else:
             image =  await self.build_image(
                 path=path,

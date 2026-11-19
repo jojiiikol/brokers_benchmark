@@ -17,6 +17,8 @@ async def wait_for_result_collection(
         return
 
     Path(completion_file).touch()
+    from src.components.common.prometheus_metrics import COMPONENT_METRICS_FINAL
+    COMPONENT_METRICS_FINAL.set(1)
     # The metrics endpoint must stay available until scenario cleanup.
     await asyncio.Event().wait()
 
@@ -75,6 +77,9 @@ class ProducerMetrics:
         self._last_report_at = time.monotonic()
         self._in_flight = 0
         self._max_in_flight = 0
+
+    def measurement_snapshot(self):
+        return self._total.accepted, self._total.payload_bytes
 
     async def track(
             self,
