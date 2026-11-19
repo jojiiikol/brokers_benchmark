@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import logging
 import time
+from pathlib import Path
+from src.components.common.phase_control import READY, synchronized_consumer
 
 import nats
 from nats.errors import NoServersError, TimeoutError
@@ -145,6 +147,7 @@ class NatsConsumer:
             durable=self.consumer_name,
             config=self._consumer_config(),
         )
+        Path(READY).touch()
         try:
             while True:
                 try:
@@ -173,6 +176,8 @@ class NatsConsumer:
             config=self._consumer_config(),
             cb=handler,
         )
+        await self.nc.flush()
+        Path(READY).touch()
         try:
             await completed.wait()
         finally:
@@ -223,7 +228,11 @@ class NatsConsumer:
             )
     async def close(self) -> None:
         if self.nc is not None:
-            await self.nc.drain()
+            # Consumption is already stopped. Drain can wait for an abandoned
+            # pull fetch request; flush pending acknowledgements, then close.
+            await self.nc.flush(timeout=2)
+            await self.nc.close()
+            self.nc = None
             logger.info("Closed NATS consumer connection")
 
 
@@ -236,6 +245,9 @@ async def main() -> None:
     parser.add_argument("--consumer-mode", choices=("pull", "push"), required=True)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
+    parser.add_argument("--synchronized", action="store_true")
+    parser.add_argument("--duration-seconds", type=float)
+    parser.add_argument("--load-step-duration-seconds", type=float)
     add_consumer_latency_arguments(parser)
     args = parser.parse_args()
     consumer = NatsConsumer(
@@ -246,7 +258,10 @@ async def main() -> None:
     start_metrics_server()
     try:
         await consumer.connect()
-        await consumer.consume()
+        if args.synchronized:
+            await synchronized_consumer(consumer, args.duration_seconds, step_duration=args.load_step_duration_seconds)
+        else:
+            await consumer.consume()
     finally:
         await consumer.close()
 

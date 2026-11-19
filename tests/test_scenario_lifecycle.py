@@ -162,6 +162,7 @@ class ScenarioLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 ("release", "producer-1", WARMUP_START),
                 ("wait_for_file", "producer-1", WARMUP_DONE),
                 ("release", "producer-1", MEASUREMENT_START),
+                ("release", "consumer-1", MEASUREMENT_START),
                 ("wait_for_file", "producer-1", service.PRODUCER_COMPLETION_FILE),
                 ("signal", "consumer-1", "SIGUSR2"),
                 ("queue_pending", "broker-1", "scenario"),
@@ -385,7 +386,9 @@ class ScenarioResultServiceTests(unittest.IsolatedAsyncioTestCase):
             path = await service.save(scenario, final_status="FINISHED")
             reliability = json.loads(path.read_text(encoding="utf-8"))["metrics"]["reliability"]
         self.assertEqual(reliability["expected_deliveries"], 20)
-        self.assertEqual(reliability["lost_messages"], 2)
+        self.assertEqual(reliability["unique_received"], 18)
+        # Without confirmed draining, undelivered messages are not proven lost.
+        self.assertIsNone(reliability["lost_messages"])
 
     def test_histogram_estimate_stays_within_sample_bounds(self):
         self.assertEqual(_bounded_quantile(0.49, 0.05, 0.18), 0.18)

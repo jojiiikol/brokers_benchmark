@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from pathlib import Path
-import signal
 import time
 
 import aio_pika
@@ -21,12 +20,10 @@ from src.components.common.consumer_latency import (
     add_consumer_latency_arguments,
 )
 from src.components.common.prometheus_metrics import (
-    COMPONENT_METRICS_FINAL,
-    CONSUMER_RECEIVED_AT_DRAIN,
     ConsumerPrometheusMetrics,
     start_metrics_server,
 )
-from src.components.common.phase_control import READY
+from src.components.common.phase_control import READY, synchronized_consumer
 load_dotenv()
 logger = logging.getLogger("benchmark.consumer.rabbitmq")
 
@@ -236,6 +233,8 @@ async def main():
         default="at_most_once",
     )
     parser.add_argument("--synchronized", action="store_true")
+    parser.add_argument("--duration-seconds", type=float)
+    parser.add_argument("--load-step-duration-seconds", type=float)
     args = parser.parse_args()
 
     consumer = Consumer(
@@ -255,33 +254,8 @@ async def main():
         await consumer.consume()
         return
 
-    loop = asyncio.get_running_loop()
-    stop = asyncio.Event()
-    loop.add_signal_handler(signal.SIGUSR1, stop.set)
-    loop.add_signal_handler(
-        signal.SIGUSR2,
-        lambda: CONSUMER_RECEIVED_AT_DRAIN.set(consumer.measurement_messages_total),
-    )
-    consuming = asyncio.create_task(consumer.consume(READY))
-    stopping = asyncio.create_task(stop.wait())
-    try:
-        done, _ = await asyncio.wait((consuming, stopping), return_when=asyncio.FIRST_COMPLETED)
-        if consuming in done:
-            await consuming
-            raise RuntimeError("RabbitMQ subscription ended before finalization")
-        consuming.cancel()
-        try:
-            await consuming
-        except asyncio.CancelledError:
-            pass
-        await consumer.close()
-        COMPONENT_METRICS_FINAL.set(1)
-        await asyncio.Event().wait()
-    finally:
-        consuming.cancel()
-        stopping.cancel()
-        loop.remove_signal_handler(signal.SIGUSR1)
-        loop.remove_signal_handler(signal.SIGUSR2)
+    await synchronized_consumer(consumer, args.duration_seconds, lambda: consumer.consume(READY),
+                                args.load_step_duration_seconds)
 
 
 

@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import logging
 import time
+from pathlib import Path
+from src.components.common.phase_control import READY, synchronized_consumer
 
 from aiokafka import AIOKafkaConsumer
 from aiokafka.errors import KafkaConnectionError
@@ -93,6 +95,12 @@ class KafkaConsumer:
             raise RuntimeError("Consumer is not connected")
 
         logger.info("Started Kafka consumption: group_id=%s", self.group_id)
+        # Starting the client alone does not guarantee a group assignment.
+        while not self._consumer.assignment():
+            await self._consumer.getmany(timeout_ms=100)
+        for partition in self._consumer.assignment():
+            await self._consumer.position(partition)
+        Path(READY).touch()
         try:
             async for message in self._consumer:
                 try:
@@ -159,6 +167,9 @@ async def main() -> None:
     add_consumer_latency_arguments(parser)
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
+    parser.add_argument("--synchronized", action="store_true")
+    parser.add_argument("--duration-seconds", type=float)
+    parser.add_argument("--load-step-duration-seconds", type=float)
     args = parser.parse_args()
 
     consumer = KafkaConsumer(
@@ -173,7 +184,10 @@ async def main() -> None:
     start_metrics_server()
     try:
         await consumer.connect()
-        await consumer.consume()
+        if args.synchronized:
+            await synchronized_consumer(consumer, args.duration_seconds, step_duration=args.load_step_duration_seconds)
+        else:
+            await consumer.consume()
     finally:
         await consumer.close()
 

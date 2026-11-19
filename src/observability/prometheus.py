@@ -15,6 +15,9 @@ _ORCHESTRATOR_UP = Gauge(
     "benchmark_orchestrator_up",
     "Whether the benchmark orchestrator process is running.",
 )
+_SLOT_LIMIT = Gauge("benchmark_orchestrator_scenario_slots", "Configured scenario capacity.")
+_EXPERIMENT_RUNS = Gauge("benchmark_experiment_runs", "Planned runs by status.", ("experiment_id", "status"))
+_EXPERIMENT_STATUS = Gauge("benchmark_experiment_status", "Current experiment status.", ("experiment_id", "status"))
 _ORCHESTRATOR_ACTIVE_TASKS = Gauge(
     "benchmark_orchestrator_active_scenario_tasks",
     "Scenario tasks currently tracked by the orchestrator.",
@@ -68,6 +71,15 @@ class PrometheusOrchestratorObserver:
     def __init__(self, docker_service: Any) -> None:
         self._docker_service = docker_service
         self._previous_statuses: dict[str, str] = {}
+
+    def update_experiments(self, experiments: list, slot_limit: int) -> None:
+        _SLOT_LIMIT.set(slot_limit)
+        for experiment in experiments:
+            for status in ("planned", "running", "analyzing", "finished", "partial", "cancelled", "error"):
+                _EXPERIMENT_STATUS.labels(experiment["id"], status).set(experiment["status"] == status)
+            for status in ("planned", "queued", "running", "finished", "error", "interrupted", "cancelled"):
+                _EXPERIMENT_RUNS.labels(experiment["id"], status).set(
+                    sum(run["status"] == status for run in experiment["runs"]))
 
     async def update(self, scenarios: list, active_task_count: int) -> None:
         _ORCHESTRATOR_UP.set(1)

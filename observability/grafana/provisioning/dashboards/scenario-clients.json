@@ -1,88 +1,1324 @@
 {
-  "annotations": {"list": []},
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "panels": [
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "id": 1,
-      "targets": [{"expr": "sum by (scenario_id, instance) (rate(benchmark_producer_messages_accepted_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"}[$__rate_interval]))", "legendFormat": "{{instance}}", "refId": "A"}],
-      "title": "Accepted messages per second by producer",
-      "type": "timeseries"
+      "title": "Producer RPS: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Individual selected containers and their sum. TOTAL includes only containers selected above; scenarios are never added together. Measurement phase only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (rate(benchmark_producer_messages_accepted_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"}[$__rate_interval]))",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (rate(benchmark_producer_messages_accepted_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"}[$__rate_interval]))",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "id": 2,
-      "targets": [{"expr": "sum by (scenario_id, instance) (rate(benchmark_consumer_messages_received_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"}[$__rate_interval]))", "legendFormat": "{{instance}}", "refId": "A"}],
-      "title": "Received messages per second by consumer",
-      "type": "timeseries"
+      "title": "Consumer RPS: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Individual selected containers and their sum. TOTAL includes only containers selected above; scenarios are never added together. Measurement phase only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (rate(benchmark_consumer_messages_received_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"}[$__rate_interval]))",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (rate(benchmark_consumer_messages_received_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"}[$__rate_interval]))",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "id": 3,
-      "targets": [{"expr": "sum by (scenario_id, instance) (benchmark_producer_in_flight{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"})", "legendFormat": "{{instance}}", "refId": "A"}],
-      "title": "In-flight operations by producer",
-      "type": "timeseries"
+      "title": "Producer accepted messages: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Individual selected containers and their sum. TOTAL includes only containers selected above; scenarios are never added together. Measurement phase only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (benchmark_producer_messages_accepted_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (benchmark_producer_messages_accepted_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 4,
-      "targets": [{"expr": "sum by (scenario_id, instance) (benchmark_consumer_messages_received_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})", "legendFormat": "{{instance}}", "refId": "A"}],
-      "title": "Total received messages by consumer",
-      "type": "timeseries"
+      "title": "Consumer received messages: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Individual selected containers and their sum. TOTAL includes only containers selected above; scenarios are never added together. Measurement phase only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (benchmark_consumer_messages_received_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (benchmark_consumer_messages_received_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
       "id": 5,
-      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, scenario_id, instance) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))", "legendFormat": "{{instance}}", "refId": "A"}],
-      "title": "Delivery latency P95 by consumer",
-      "type": "timeseries"
+      "title": "Producer in-flight: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Current in-flight publish operations per selected producer and their sum, separately for each scenario.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (benchmark_producer_in_flight{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"})",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (benchmark_producer_in_flight{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"})",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "id": 6,
-      "targets": [{"expr": "histogram_quantile(0.99, sum by (le, scenario_id, instance) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))", "legendFormat": "{{instance}}", "refId": "A"}],
-      "title": "Delivery latency P99 by consumer",
-      "type": "timeseries"
+      "title": "Producer publish errors: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Individual selected containers and their sum. TOTAL includes only containers selected above; scenarios are never added together. Measurement phase only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (benchmark_producer_publish_errors_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (benchmark_producer_publish_errors_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "cores"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
       "id": 7,
-      "targets": [{"expr": "sum by (scenario_id, container_name) (rate(benchmark_container_cpu_seconds{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=~\"producer|consumer\"}[$__rate_interval]))", "legendFormat": "{{container_name}}", "refId": "A"}],
-      "title": "CPU usage by client container",
-      "type": "timeseries"
+      "title": "Consumer mean latency: each and combined",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "COMBINED is the sample-weighted mean (sum of latency / number of samples), not the mean of consumer means. Calculated over the rate interval.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (rate(benchmark_consumer_latency_seconds_sum{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])) / sum by (scenario_id, instance) (rate(benchmark_consumer_latency_seconds_count{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (rate(benchmark_consumer_latency_seconds_sum{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])) / sum by (scenario_id) (rate(benchmark_consumer_latency_seconds_count{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval]))",
+          "legendFormat": "COMBINED selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
       "id": 8,
-      "targets": [{"expr": "sum by (scenario_id, container_name) (benchmark_container_memory_bytes{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=~\"producer|consumer\"})", "legendFormat": "{{container_name}}", "refId": "A"}],
-      "title": "Memory usage by client container",
-      "type": "timeseries"
+      "title": "Consumer latency P50: each and combined",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "COMBINED is calculated from all selected consumers together, separately per scenario. Consumer percentiles are never summed or averaged. Latency is sampled from measurement messages; the graph uses the rate interval.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le, scenario_id, instance) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.5, sum by (le, scenario_id) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "COMBINED selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Consumer latency P75: each and combined",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "COMBINED is calculated from all selected consumers together, separately per scenario. Consumer percentiles are never summed or averaged. Latency is sampled from measurement messages; the graph uses the rate interval.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.75, sum by (le, scenario_id, instance) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.75, sum by (le, scenario_id) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "COMBINED selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Consumer latency P95: each and combined",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "COMBINED is calculated from all selected consumers together, separately per scenario. Consumer percentiles are never summed or averaged. Latency is sampled from measurement messages; the graph uses the rate interval.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, scenario_id, instance) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, scenario_id) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "COMBINED selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Consumer latency P99: each and combined",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "COMBINED is calculated from all selected consumers together, separately per scenario. Consumer percentiles are never summed or averaged. Latency is sampled from measurement messages; the graph uses the rate interval.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le, scenario_id, instance) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, scenario_id) (rate(benchmark_consumer_latency_seconds_bucket{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\"}[$__rate_interval])))",
+          "legendFormat": "COMBINED selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Consumer duplicate messages: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Individual selected containers and their sum. TOTAL includes only containers selected above; scenarios are never added together. Measurement phase only.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, instance) (benchmark_consumer_duplicate_messages_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "{{scenario_id}} / {{instance}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (benchmark_consumer_duplicate_messages_total{scenario_id=~\"${scenario_id:regex}\",instance=~\"${container:regex}\",phase=\"measurement\"})",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Producer CPU: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "CPU for each selected producer and their sum, separately per scenario. CPU is in used cores; RAM is in bytes. Includes all lifecycle phases visible in the time range.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, container_name) (rate(benchmark_container_cpu_seconds{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"producer\"}[$__rate_interval]))",
+          "legendFormat": "{{scenario_id}} / {{container_name}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (rate(benchmark_container_cpu_seconds{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"producer\"}[$__rate_interval]))",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Consumer CPU: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "CPU for each selected consumer and their sum, separately per scenario. CPU is in used cores; RAM is in bytes. Includes all lifecycle phases visible in the time range.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, container_name) (rate(benchmark_container_cpu_seconds{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"consumer\"}[$__rate_interval]))",
+          "legendFormat": "{{scenario_id}} / {{container_name}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (rate(benchmark_container_cpu_seconds{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"consumer\"}[$__rate_interval]))",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Producer RAM: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "RAM for each selected producer and their sum, separately per scenario. CPU is in used cores; RAM is in bytes. Includes all lifecycle phases visible in the time range.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, container_name) (benchmark_container_memory_bytes{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"producer\"})",
+          "legendFormat": "{{scenario_id}} / {{container_name}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (benchmark_container_memory_bytes{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"producer\"})",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Consumer RAM: each and sum",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "RAM for each selected consumer and their sum, separately per scenario. CPU is in used cores; RAM is in bytes. Includes all lifecycle phases visible in the time range.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (scenario_id, container_name) (benchmark_container_memory_bytes{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"consumer\"})",
+          "legendFormat": "{{scenario_id}} / {{container_name}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (scenario_id) (benchmark_container_memory_bytes{scenario_id=~\"${scenario_id:regex}\",container_name=~\"${container:regex}\",component=\"consumer\"})",
+          "legendFormat": "TOTAL selected / {{scenario_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(TOTAL|COMBINED) selected /"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    8,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ],
   "schemaVersion": 41,
-  "tags": ["benchmark", "clients"],
+  "tags": [
+    "benchmark",
+    "clients",
+    "scaling"
+  ],
   "templating": {
     "list": [
       {
         "allValue": ".+",
-        "current": {"text": "All", "value": "$__all"},
-        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
         "definition": "label_values(up{job=\"benchmark-components\",component=~\"producer|consumer\"}, scenario_id)",
         "includeAll": true,
         "label": "Scenario",
@@ -95,8 +1331,14 @@
       },
       {
         "allValue": ".+",
-        "current": {"text": "All", "value": "$__all"},
-        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
         "definition": "label_values(up{job=\"benchmark-components\",component=~\"producer|consumer\",scenario_id=~\"${scenario_id:regex}\"}, instance)",
         "includeAll": true,
         "label": "Containers",
@@ -109,8 +1351,23 @@
       }
     ]
   },
-  "time": {"from": "now-15m", "to": "now"},
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
   "title": "Scenario producers and consumers",
   "uid": "scenario-clients",
-  "version": 1
+  "version": 2,
+  "description": "Scaling view: individual producers/consumers and totals of selected containers. Select a scenario, then keep Containers = All for the full scenario total. Combined latency uses the merged distribution, never a sum of percentiles.",
+  "refresh": "5s",
+  "links": [
+    {
+      "title": "Scenario overview",
+      "type": "link",
+      "url": "/d/broker-benchmark",
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ]
 }

@@ -15,14 +15,18 @@ from src.observability.prometheus import (
     start_prometheus_server,
 )
 from src.orchestrator import Orchestrator
+from src.experiments.models import ExperimentSpecification, build_plan
+from src.experiments.service import ExperimentService, ExperimentNotFound
 
 
 def create_app(
     orchestrator: Orchestrator | None = None,
     *,
     manage_runtime: bool = True,
+    experiment_service: ExperimentService | None = None,
 ) -> FastAPI:
     benchmark_orchestrator = orchestrator or Orchestrator()
+    experiments = experiment_service or ExperimentService(benchmark_orchestrator)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -31,6 +35,7 @@ def create_app(
             return
 
         setup_logging()
+        experiments.initialize()
         if metrics_enabled():
             start_prometheus_server()
             benchmark_orchestrator.set_observer(
@@ -48,6 +53,7 @@ def create_app(
         try:
             yield
         finally:
+            await experiments.close()
             stop_event.set()
             await asyncio.gather(process_task, return_exceptions=True)
             await benchmark_orchestrator.docker_service.close_client()
@@ -58,6 +64,47 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.orchestrator = benchmark_orchestrator
+    app.state.experiments = experiments
+
+    @app.exception_handler(ExperimentNotFound)
+    async def not_found(_request, _error):
+        return JSONResponse(status_code=404, content={"detail": "Experiment not found"})
+
+    @app.post("/api/v1/experiments/plan", tags=["experiments"])
+    async def preview_experiment(payload: ExperimentSpecification):
+        return build_plan(payload)
+
+    @app.post("/api/v1/experiments", status_code=202, tags=["experiments"])
+    async def create_experiment(payload: ExperimentSpecification):
+        return await experiments.create(payload)
+
+    @app.get("/api/v1/experiments", tags=["experiments"])
+    async def list_experiments():
+        return list(experiments.experiments.values())
+
+    @app.get("/api/v1/experiments/{experiment_id}", tags=["experiments"])
+    async def get_experiment(experiment_id: str):
+        return experiments.get(experiment_id)
+
+    @app.post("/api/v1/experiments/{experiment_id}/{action}", tags=["experiments"])
+    async def experiment_action(experiment_id: str, action: str):
+        try:
+            if action == "cancel":
+                return await experiments.cancel(experiment_id)
+            if action in ("resume", "retry-failed"):
+                return await experiments.resume(experiment_id, retry_failed=action == "retry-failed")
+            if action == "analyze":
+                return await experiments.reanalyze(experiment_id)
+            raise HTTPException(status_code=404, detail="Unknown experiment action")
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.get("/api/v1/experiments/{experiment_id}/results", tags=["experiments"])
+    async def experiment_results(experiment_id: str):
+        try:
+            return experiments.results(experiment_id)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(
