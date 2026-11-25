@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from src.components.common.runtime import run_component
 import logging
 import time
 from src.components.common.phase_control import synchronized_producer
@@ -71,8 +72,9 @@ class NatsProducer:
                 self.js = self.nc.jetstream()
                 await self._ensure_stream()
                 logger.info(
-                    "Connected to NATS JetStream at %s; publishes use Core NATS without PubAck",
+                    "Connected to NATS JetStream at %s; guarantee=%s",
                     self.server,
+                    self.guarantee_type,
                 )
                 return
             except NoServersError:
@@ -205,4 +207,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_component(main)

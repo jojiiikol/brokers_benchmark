@@ -1,7 +1,9 @@
 import asyncio
+from src.components.common.runtime import run_component
 import logging
 from pathlib import Path
 import time
+from src.components.common.message_ids import MessageIdTracker
 
 import aio_pika
 from aiormq import AMQPConnectionError
@@ -73,7 +75,7 @@ class Consumer:
         self.received_messages_total = 0
         self.measurement_messages_total = 0
         self._completed_metrics_windows = 0
-        self._seen_message_ids: set[int] = set()
+        self._seen_message_ids = MessageIdTracker()
         self.prometheus_metrics = ConsumerPrometheusMetrics("rabbitmq")
 
     @property
@@ -154,10 +156,8 @@ class Consumer:
 
         self.received_messages_total += 1
         self.prometheus_metrics.received(phase)
-        if message_id in self._seen_message_ids:
+        if self._seen_message_ids.seen(message_id):
             self.prometheus_metrics.duplicate(phase)
-        else:
-            self._seen_message_ids.add(message_id)
         if phase == "measurement":
             self.measurement_messages_total += 1
             if self.measurement_messages_total % self.latency_sample_every == 0:
@@ -260,7 +260,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_component(main)
 
 
 

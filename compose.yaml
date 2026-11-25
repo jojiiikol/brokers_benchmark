@@ -8,6 +8,7 @@ services:
     environment:
       OBSERVABILITY_NETWORK: brokers_benchmark_observability
       MAX_CONCURRENT_SCENARIOS: ${MAX_CONCURRENT_SCENARIOS:-1}
+      BENCHMARK_EVENT_LOOP: ${BENCHMARK_EVENT_LOOP:-uvloop}
     expose:
       - "8000"
     ports:

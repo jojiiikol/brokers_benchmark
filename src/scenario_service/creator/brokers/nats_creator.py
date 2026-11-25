@@ -18,6 +18,7 @@ class NatsJetStreamCreator(BaseBrokerCreator):
             **kwargs,
     ) -> str | None:
         broker_name = self.broker_hostname(scenario_id)
+        memory_limit = 1024 * 1024 * 1024
         image = await self.docker_service.get_image(tag="nats:2.15.2")
         return await self.docker_service.create_container(
             container_config=ContainerConfig(
@@ -25,9 +26,13 @@ class NatsJetStreamCreator(BaseBrokerCreator):
                 name=broker_name,
                 network_name=f"network-{scenario_id}",
                 cmd=["-js", "-m", "8222"],
+                # JetStream's automatic memory-store limit otherwise uses the
+                # VM's RAM, which can exceed this container's entire limit.
+                # NATS 2.15 also bases that store limit on GOMEMLIMIT when set.
+                env={"GOMEMLIMIT": str(memory_limit * 3 // 4)},
                 labels={"component": "broker"},
                 resources=ResourceLimits(
-                    memory=1 * 1024 * 1024 * 1024,
+                    memory=memory_limit,
                     nano_cpus=1 * 1_000_000_000,
                 ),
             ),

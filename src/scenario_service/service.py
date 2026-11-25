@@ -71,6 +71,7 @@ class Scenario:
     )
     started_at: datetime.datetime | None = None
     warmup_finished_at: datetime.datetime | None = None
+    warmup_drained: bool | None = None
     measurement_started_at: datetime.datetime | None = None
     measurement_finished_at: datetime.datetime | None = None
     drain_started_at: datetime.datetime | None = None
@@ -89,6 +90,7 @@ class ScenarioService:
     PRODUCER_COMPLETION_FILE = "/tmp/benchmark-publishing-finished"
     PHASE_RELEASE_LEAD_SECONDS: float = 1
     FINAL_SCRAPE_TIMEOUT_SECONDS: float = 15
+    WARMUP_DRAIN_TIMEOUT_SECONDS: float = 60
 
     def __init__(
             self,
@@ -334,6 +336,12 @@ class ScenarioService:
             await asyncio.sleep(scenario.config.warmup_seconds)
             if synchronized:
                 await self._wait_for_files(producers, WARMUP_DONE)
+                if scenario.config.warmup_seconds and hasattr(self.result_service, "wait_for_warmup"):
+                    logger.info("Waiting for warm-up deliveries before measurement: scenario=%s", scenario.id)
+                    scenario.warmup_drained = await self.result_service.wait_for_warmup(
+                        scenario, self.WARMUP_DRAIN_TIMEOUT_SECONDS)
+                    if scenario.warmup_drained is False:
+                        raise RuntimeError("Warm-up backlog did not drain; refusing to measure a contaminated interval")
             scenario.warmup_finished_at = datetime.datetime.now(datetime.UTC)
 
             if synchronized:

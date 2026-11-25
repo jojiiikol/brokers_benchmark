@@ -1,7 +1,9 @@
 import argparse
 import asyncio
+from src.components.common.runtime import run_component
 import logging
 import time
+from src.components.common.message_ids import MessageIdTracker
 from pathlib import Path
 from src.components.common.phase_control import READY, synchronized_consumer
 
@@ -57,7 +59,7 @@ class KafkaConsumer:
         self.received_messages_total = 0
         self.measurement_messages_total = 0
         self._completed_metrics_windows = 0
-        self._seen_message_ids: set[int] = set()
+        self._seen_message_ids = MessageIdTracker()
         self.prometheus_metrics = ConsumerPrometheusMetrics("kafka")
         self._consumer: AIOKafkaConsumer | None = None
 
@@ -74,6 +76,7 @@ class KafkaConsumer:
                 auto_offset_reset="latest",
                 enable_auto_commit=self.guarantee_type == "at_most_once",
                 max_partition_fetch_bytes=2 * 1024 * 1024,
+                max_poll_records=256,
             )
             try:
                 await consumer.start()
@@ -102,29 +105,44 @@ class KafkaConsumer:
             await self._consumer.position(partition)
         Path(READY).touch()
         try:
-            async for message in self._consumer:
-                try:
-                    phase, sent_at, message_id = decode_message_metadata(message.value)
-                except InvalidBenchmarkMessage as error:
-                    logger.warning("Received malformed benchmark message: %s", error)
+            while True:
+                batches = await self._consumer.getmany(timeout_ms=100, max_records=256)
+                if not batches:
+                    await asyncio.sleep(0)
                     continue
-                self.received_messages_total += 1
-                self.prometheus_metrics.received(phase)
-                if message_id in self._seen_message_ids:
-                    self.prometheus_metrics.duplicate(phase)
-                else:
-                    self._seen_message_ids.add(message_id)
-                if phase == "measurement":
-                    self.measurement_messages_total += 1
-                    if self.measurement_messages_total % self.latency_sample_every == 0:
-                        latency_seconds = (time.monotonic_ns() - sent_at) / 1_000_000_000
-                        self.metrics.observe(latency_seconds * 1000)
-                        self.prometheus_metrics.observe_latency_seconds(latency_seconds)
-                        self._report_metrics_if_window_complete()
-                if self.guarantee_type == "at_least_once":
-                    await self._consumer.commit()
+                offsets = {}
+                for partition, messages in batches.items():
+                    for message in messages:
+                        self._observe(message.value)
+                        offsets[partition] = message.offset + 1
+                    # Allow timers and heartbeats to run even when getmany()
+                    # repeatedly finds data already buffered by the client.
+                    await asyncio.sleep(0)
+                if offsets and self.guarantee_type == "at_least_once":
+                    # Commit only offsets actually processed, never the fetch
+                    # position. A crash can redeliver this batch, preserving
+                    # at-least-once without one network round-trip per record.
+                    await self._consumer.commit(offsets)
         finally:
             self._log_metrics(final=True)
+
+    def _observe(self, body: bytes) -> None:
+        try:
+            phase, sent_at, message_id = decode_message_metadata(body)
+        except InvalidBenchmarkMessage as error:
+            logger.warning("Received malformed benchmark message: %s", error)
+            return
+        self.received_messages_total += 1
+        self.prometheus_metrics.received(phase)
+        if self._seen_message_ids.seen(message_id):
+            self.prometheus_metrics.duplicate(phase)
+        if phase == "measurement":
+            self.measurement_messages_total += 1
+            if self.measurement_messages_total % self.latency_sample_every == 0:
+                latency_seconds = (time.monotonic_ns() - sent_at) / 1_000_000_000
+                self.metrics.observe(latency_seconds * 1000)
+                self.prometheus_metrics.observe_latency_seconds(latency_seconds)
+                self._report_metrics_if_window_complete()
 
     def _report_metrics_if_window_complete(self) -> None:
         if self.metrics.count >= self.metrics_window_size:
@@ -193,4 +211,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_component(main)

@@ -1,11 +1,26 @@
 """Low-overhead Prometheus metrics shared by benchmark components."""
 
+import asyncio
+import weakref
+
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+_BUFFERED_METRICS = weakref.WeakSet()
+_METRICS_FLUSH_TASK: asyncio.Task | None = None
+
+
+async def _flush_metrics():
+    while True:
+        await asyncio.sleep(.1)
+        for metrics in list(_BUFFERED_METRICS):
+            metrics.flush()
 
 COMPONENT_METRICS_FINAL = Gauge(
     "benchmark_component_metrics_final",
     "Whether the client has stopped updating its benchmark metrics.",
 )
+WARMUP_ACCEPTED = Gauge("benchmark_producer_warmup_messages", "Final accepted message count for the warm-up phase.")
+WARMUP_FINISHED = Gauge("benchmark_producer_warmup_finished", "Whether the producer finished publishing warm-up messages.")
 CONSUMER_RECEIVED_AT_DRAIN = Gauge(
     "benchmark_consumer_received_at_drain",
     "Measured deliveries processed before the consumer received the drain signal.",
@@ -72,7 +87,9 @@ _CONSUMER_LATENCY_MAX = Gauge(
 
 def start_metrics_server(port: int = 8000) -> None:
     """Expose the process registry to Prometheus on all container interfaces."""
+    global _METRICS_FLUSH_TASK
     start_http_server(port, addr="0.0.0.0")
+    _METRICS_FLUSH_TASK = asyncio.get_running_loop().create_task(_flush_metrics())
 
 
 class ProducerPrometheusMetrics:
@@ -91,16 +108,28 @@ class ProducerPrometheusMetrics:
             phase: _PRODUCER_PAYLOAD_BYTES.labels(broker=broker, phase=phase)
             for phase in ("warmup", "measurement")
         }
+        self._pending = {phase: [0, 0] for phase in ("warmup", "measurement")}
+        self._current_in_flight = 0
+        _BUFFERED_METRICS.add(self)
 
     def accepted(self, phase: str, payload_bytes: int) -> None:
-        self._accepted[phase].inc()
-        self._payload_bytes[phase].inc(payload_bytes)
+        pending = self._pending[phase]
+        pending[0] += 1
+        pending[1] += payload_bytes
 
     def failed(self, phase: str) -> None:
         self._errors[phase].inc()
 
     def set_in_flight(self, count: int) -> None:
-        self._in_flight.set(count)
+        self._current_in_flight = count
+
+    def flush(self):
+        for phase, pending in self._pending.items():
+            if pending[0]:
+                self._accepted[phase].inc(pending[0])
+                self._payload_bytes[phase].inc(pending[1])
+                pending[0] = pending[1] = 0
+        self._in_flight.set(self._current_in_flight)
 
 
 class ConsumerPrometheusMetrics:
@@ -118,9 +147,17 @@ class ConsumerPrometheusMetrics:
         self._latency_max = _CONSUMER_LATENCY_MAX.labels(broker=broker)
         self._minimum_latency: float | None = None
         self._maximum_latency: float | None = None
+        self._pending_received = {phase: 0 for phase in ("warmup", "measurement")}
+        _BUFFERED_METRICS.add(self)
 
     def received(self, phase: str) -> None:
-        self._received[phase].inc()
+        self._pending_received[phase] += 1
+
+    def flush(self):
+        for phase, pending in self._pending_received.items():
+            if pending:
+                self._received[phase].inc(pending)
+                self._pending_received[phase] = 0
 
     def snapshot_latency(self):
         samples = next(iter(self._latency.collect())).samples
@@ -132,15 +169,9 @@ class ConsumerPrometheusMetrics:
 
     def observe_latency_seconds(self, latency_seconds: float) -> None:
         self._latency.observe(latency_seconds)
-        self._minimum_latency = (
-            latency_seconds
-            if self._minimum_latency is None
-            else min(self._minimum_latency, latency_seconds)
-        )
-        self._maximum_latency = (
-            latency_seconds
-            if self._maximum_latency is None
-            else max(self._maximum_latency, latency_seconds)
-        )
-        self._latency_min.set(self._minimum_latency)
-        self._latency_max.set(self._maximum_latency)
+        if self._minimum_latency is None or latency_seconds < self._minimum_latency:
+            self._minimum_latency = latency_seconds
+            self._latency_min.set(latency_seconds)
+        if self._maximum_latency is None or latency_seconds > self._maximum_latency:
+            self._maximum_latency = latency_seconds
+            self._latency_max.set(latency_seconds)

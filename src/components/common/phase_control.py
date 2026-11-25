@@ -19,6 +19,9 @@ async def synchronized_producer(producer, args):
     Path(READY).touch()
     await wait_for_release(WARMUP_START)
     await producer.publish_for(args.warmup_seconds, phase="warmup")
+    from src.components.common.prometheus_metrics import WARMUP_ACCEPTED, WARMUP_FINISHED
+    WARMUP_ACCEPTED.set(producer.metrics.measurement_snapshot()[0])
+    WARMUP_FINISHED.set(1)
     Path(WARMUP_DONE).touch()
     await wait_for_release(MEASUREMENT_START)
     snapshot = asyncio.create_task(measurement_snapshot(
@@ -90,6 +93,7 @@ async def synchronized_consumer(consumer, duration_seconds=None, consume=None, s
         consuming.cancel()
         await asyncio.gather(consuming, return_exceptions=True)
         await consumer.close()
+        consumer.prometheus_metrics.flush()
         COMPONENT_METRICS_FINAL.set(1)
         await asyncio.Event().wait()
     finally:

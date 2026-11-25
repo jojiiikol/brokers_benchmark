@@ -1,4 +1,5 @@
 import abc
+import os
 
 from src.docker_configurator import ContainerConfig
 from src.docker_configurator.schema import ResourceLimits
@@ -60,6 +61,7 @@ class BaseServiceCreator(BaseCreator):
                 name=f"{component_type}-{scenario_id}{instance_suffix}",
                 network_name=f"network-{scenario_id}",
                 cmd=docker_args,
+                env={"BENCHMARK_EVENT_LOOP": os.getenv("BENCHMARK_EVENT_LOOP", "uvloop")},
                 resources=ResourceLimits(
                     nano_cpus=round(config.cpu_limit * 1_000_000_000),
                     memory=(

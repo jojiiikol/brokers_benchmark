@@ -14,6 +14,7 @@ from typing import Any
 import requests
 
 from src.scenario_service.dto.interaction_mode import InteractionMode
+from src.scenario_service.dto.producer_config import GuaranteeType
 
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,32 @@ class PrometheusScenarioResultsCollector:
                     await asyncio.sleep(0.5)
         except TimeoutError:
             logger.warning("Final Prometheus scrape incomplete for scenario %s", scenario_id)
+            return False
+
+    async def wait_for_warmup(self, scenario, timeout: float) -> bool | None:
+        if os.getenv("BENCHMARK_METRICS_ENABLED", "true").lower() in {"0", "false", "no", "off"}:
+            return None
+        # Without publish confirmations, accepted != stored by the broker.
+        # A permitted loss cannot be distinguished from a backlog by counters.
+        if scenario.config.producer_config.guarantee_type is not GuaranteeType.AT_LEAST_ONCE:
+            return None
+        selector = f'scenario_id="{scenario.id}"'
+        factor = scenario.config.consumer_config.count if scenario.config.interaction_mode is InteractionMode.PUB_SUB else 1
+        try:
+            async with asyncio.timeout(timeout):
+                while True:
+                    finished, sent, received, duplicates = await asyncio.gather(
+                        self._query(f'count(benchmark_producer_warmup_finished{{{selector}}} == 1)'),
+                        self._query(f'sum(benchmark_producer_warmup_messages{{{selector}}})'),
+                        self._query(f'sum(benchmark_consumer_messages_received_total{{{selector},phase="warmup"}})'),
+                        self._query(f'sum(benchmark_consumer_duplicate_messages_total{{{selector},phase="warmup"}})'),
+                    )
+                    if (finished == scenario.config.producer_config.count and sent is not None
+                            and received is not None and duplicates is not None
+                            and received-duplicates >= sent*factor):
+                        return True
+                    await asyncio.sleep(.5)
+        except TimeoutError:
             return False
 
     async def received_at_drain(self, scenario_id: str) -> int | None:
@@ -228,6 +255,9 @@ class ScenarioResultService:
     async def wait_for_final_metrics(self, scenario_id: str, expected: int, timeout: float) -> bool:
         return await self._collector.wait_for_final_metrics(scenario_id, expected, timeout)
 
+    async def wait_for_warmup(self, scenario, timeout: float) -> bool | None:
+        return await self._collector.wait_for_warmup(scenario, timeout)
+
     async def save(self, scenario: Any, final_status: str) -> Path:
         metrics = await self._collector.collect(scenario.id)
         measurement_start = scenario.measurement_started_at
@@ -252,6 +282,7 @@ class ScenarioResultService:
         quality = dict(final_metrics_collected=scenario.final_metrics_collected is True,
                        interval_source="prometheus_scrape_resolution", excluded_metrics={}, warnings=[])
         metrics["quality"] = quality
+        quality["warmup_drained"] = getattr(scenario, "warmup_drained", None)
         for index, step in enumerate(metrics.get("steps", [])):
             if (step.get("snapshot_lateness_seconds") or 0) > .1:
                 for section in ("rates", "latency_seconds"):

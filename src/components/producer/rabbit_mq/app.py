@@ -1,4 +1,5 @@
 import asyncio
+from src.components.common.runtime import run_component
 import logging
 import os
 import time
@@ -302,7 +303,7 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_component(main)
 
 
 

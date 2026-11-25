@@ -183,7 +183,7 @@ class SdkDockerService:
         # Удаляем контейнеры
         for container in containers:
             try:
-                await container.delete(force=True)
+                await container.delete(force=True, v=True)
                 logger.info("Container %s deleted", container.id)
             except Exception:
                 logger.exception(
@@ -223,7 +223,7 @@ class SdkDockerService:
         )
         for container in containers:
             try:
-                await container.delete(force=True)
+                await container.delete(force=True, v=True)
                 logger.info("Container %s deleted", container.id)
             except Exception:
                 logger.exception("Failed to delete container %s", container.id)

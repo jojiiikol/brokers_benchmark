@@ -1,12 +1,15 @@
 import argparse
 import asyncio
+from src.components.common.runtime import run_component
 import logging
 import time
+from src.components.common.message_ids import MessageIdTracker
 from pathlib import Path
 from src.components.common.phase_control import READY, synchronized_consumer
+from src.components.consumer.nats.pull import StreamingPullReader
 
 import nats
-from nats.errors import NoServersError, TimeoutError
+from nats.errors import NoServersError
 from nats.js.api import (
     AckPolicy,
     ConsumerConfig,
@@ -73,7 +76,7 @@ class NatsConsumer:
         self.received_messages_total = 0
         self.measurement_messages_total = 0
         self._completed_metrics_windows = 0
-        self._seen_message_ids: set[int] = set()
+        self._seen_message_ids = MessageIdTracker()
         self.prometheus_metrics = ConsumerPrometheusMetrics("nats")
 
     async def connect(self) -> None:
@@ -142,21 +145,11 @@ class NatsConsumer:
             await self._consume_push()
 
     async def _consume_pull(self) -> None:
-        subscription = await self.js.pull_subscribe(
-            SUBJECT,
-            durable=self.consumer_name,
-            config=self._consumer_config(),
-        )
-        Path(READY).touch()
+        config = self._consumer_config()
+        config.filter_subject = SUBJECT
+        reader = StreamingPullReader(self.nc, self.js, STREAM_NAME, config, self._observe)
         try:
-            while True:
-                try:
-                    messages = await subscription.fetch(batch=100, timeout=1)
-                except TimeoutError:
-                    continue
-                for message in messages:
-                    self._observe(message.data)
-                    await message.ack()
+            await reader.run(lambda: Path(READY).touch())
         finally:
             self._log_metrics(final=True)
 
@@ -188,10 +181,8 @@ class NatsConsumer:
             phase, sent_at, message_id = decode_message_metadata(body)
             self.received_messages_total += 1
             self.prometheus_metrics.received(phase)
-            if message_id in self._seen_message_ids:
+            if self._seen_message_ids.seen(message_id):
                 self.prometheus_metrics.duplicate(phase)
-            else:
-                self._seen_message_ids.add(message_id)
             if phase == "measurement":
                 self.measurement_messages_total += 1
                 if self.measurement_messages_total % self.latency_sample_every == 0:
@@ -267,4 +258,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_component(main)

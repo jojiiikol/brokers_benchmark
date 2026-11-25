@@ -6,6 +6,7 @@ import enum
 import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from time import monotonic
 
 
 class LoadType(str, enum.Enum):
@@ -163,15 +164,20 @@ async def publish_with_profile(
     """Call ``publish`` at the current target rate for one phase.
 
     The deadline is authoritative. When a broker is slower than the requested
-    rate, the producer never sends a compensating burst afterwards. Publish
+    rate, the producer drops missed slots rather than replaying a backlog. Publish
     operations run concurrently, but the bounded window prevents an unlimited
     number of tasks and payloads from accumulating in producer memory.
+    Timer jitter can coalesce at most 2 ms of scheduled sends. This permits
+    rates above the event loop's timer resolution without busy-waiting.
     """
     if max_in_flight <= 0:
         raise ValueError("max_in_flight must be greater than zero")
 
     loop = asyncio.get_running_loop()
-    started_at = loop.time()
+    # uvloop.time() has millisecond resolution. Use a high-resolution clock
+    # for pacing; keep the cheaper loop clock for unpaced maximum throughput.
+    clock = loop.time if scheduler.load_type is LoadType.MAX_THROUGHPUT else monotonic
+    started_at = clock()
     deadline = started_at + duration_seconds
     next_publish_at = started_at
     current_step_index: int | None = None
@@ -195,11 +201,11 @@ async def publish_with_profile(
             capacity.set()
 
     async def publish_repeatedly(step: LoadStep) -> None:
-        while loop.time() < deadline:
+        while clock() < deadline:
             # Some clients can accept a publication without suspending. Yield
             # periodically so their I/O tasks and other workers can run.
             for _ in range(32):
-                if loop.time() >= deadline:
+                if clock() >= deadline:
                     return
                 update_active(1)
                 try:
@@ -216,10 +222,12 @@ async def publish_with_profile(
                 tasks.create_task(publish_repeatedly(step))
             return
 
-        while (now := loop.time()) < deadline:
+        while (now := clock()) < deadline:
             if active >= max_in_flight:
                 capacity.clear()
                 await capacity.wait()
+                # A full publication window is backpressure, not timer jitter.
+                next_publish_at = clock()
                 continue
 
             step = scheduler.step_at(now - started_at)
@@ -231,10 +239,13 @@ async def publish_with_profile(
 
             delay = next_publish_at - now
             if delay > 0:
-                await asyncio.sleep(min(delay, deadline - now))
+                # uvloop rounds sub-millisecond sleeps to a zero-delay yield.
+                # A minimum timer tick avoids spinning a CPU between sends;
+                # the bounded jitter window below releases the due messages.
+                await asyncio.sleep(min(max(delay, .001), deadline - now))
                 continue
 
             update_active(1)
             task = tasks.create_task(publish(step))
             task.add_done_callback(on_completed)
-            next_publish_at = max(next_publish_at + 1 / step.target_rps, loop.time())
+            next_publish_at = max(next_publish_at, now - .002) + 1 / step.target_rps

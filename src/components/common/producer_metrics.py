@@ -87,18 +87,18 @@ class ProducerMetrics:
             publish: Callable[[], Awaitable[None]],
     ) -> None:
         self._require_phase()
-        self._increment("attempts", 1)
+        self._total.attempts += 1
         try:
             await publish()
         except Exception:
-            self._increment("errors", 1)
+            self._total.errors += 1
             if self._sink is not None:
                 self._sink.failed(self._phase)
             self._report_if_due()
             raise
         else:
-            self._increment("accepted", 1)
-            self._increment("payload_bytes", payload_bytes)
+            self._total.accepted += 1
+            self._total.payload_bytes += payload_bytes
             if self._sink is not None:
                 self._sink.accepted(self._phase, payload_bytes)
             self._report_if_due()
@@ -106,17 +106,16 @@ class ProducerMetrics:
     def set_in_flight(self, count: int) -> None:
         self._require_phase()
         self._in_flight = count
-        self._max_in_flight = max(self._max_in_flight, count)
+        if count > self._max_in_flight:
+            self._max_in_flight = count
         if self._sink is not None:
             self._sink.set_in_flight(count)
-        self._report_if_due()
 
     def log_final(self) -> None:
         self._require_phase()
+        if self._sink is not None and hasattr(self._sink, "flush"):
+            self._sink.flush()
         self._log_window(time.monotonic(), final=True)
-
-    def _increment(self, field: str, value: int) -> None:
-        setattr(self._total, field, getattr(self._total, field) + value)
 
     def _report_if_due(self) -> None:
         now = time.monotonic()

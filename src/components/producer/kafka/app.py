@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from src.components.common.runtime import run_component
 import logging
 import time
 from src.components.common.phase_control import synchronized_producer
@@ -81,6 +82,11 @@ class KafkaProducer:
                 acks="all" if reliable else 0,
                 enable_idempotence=reliable,
                 max_request_size=2 * 1024 * 1024,
+                # The default 16 KiB batch holds only one benchmark message at
+                # common payload sizes. Allow concurrent publications to share
+                # requests without imposing a linger delay on low-rate tests.
+                max_batch_size=1024 * 1024,
+                linger_ms=0,
             )
             try:
                 await producer.start()
@@ -221,4 +227,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_component(main)

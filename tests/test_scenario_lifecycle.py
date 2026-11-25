@@ -720,6 +720,7 @@ class KafkaCreatorTests(unittest.IsolatedAsyncioTestCase):
         container_config, labels = docker.container_configs[0]
         self.assertEqual(container_config.image, "apache/kafka:4.4.0")
         self.assertEqual(container_config.env["KAFKA_NUM_PARTITIONS"], "16")
+        self.assertEqual(container_config.env["KAFKA_HEAP_OPTS"], "-Xms256m -Xmx512m")
         self.assertEqual(container_config.env["KAFKA_AUTO_CREATE_TOPICS_ENABLE"], "true")
         self.assertEqual(labels, {"scenario_id": "scenario-1"})
         self.assertEqual(creator.broker_hostname("scenario-1"), "kafka-scenario-1")
@@ -803,6 +804,7 @@ class NatsCreatorTests(unittest.IsolatedAsyncioTestCase):
             container_config, _ = docker.container_configs[0]
             self.assertEqual(container_config.image, "nats:2.15.2")
             self.assertEqual(container_config.cmd, ["-js", "-m", "8222"])
+            self.assertEqual(container_config.env["GOMEMLIMIT"], str(768 * 1024 * 1024))
             self.assertEqual(creator.consumer_mode_args(), ("--consumer-mode", mode))
 
 

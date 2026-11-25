@@ -40,6 +40,10 @@ class KafkaCreator(BaseBrokerCreator):
                 network_name=f"network-{scenario_id}",
                 labels={"component": "broker"},
                 env={
+                    # kafka-server-start.sh defaults to -Xms1G -Xmx1G, equal
+                    # to this container's entire limit. Leave native memory,
+                    # direct buffers and filesystem cache outside the heap.
+                    "KAFKA_HEAP_OPTS": "-Xms256m -Xmx512m",
                     "KAFKA_NODE_ID": "1",
                     "KAFKA_PROCESS_ROLES": "broker,controller",
                     "KAFKA_LISTENERS": "PLAINTEXT://:9092,CONTROLLER://:9093",
