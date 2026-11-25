@@ -1,7 +1,9 @@
 import argparse
 import asyncio
 import logging
+import signal
 import time
+from pathlib import Path
 
 import nats
 from nats.errors import NoServersError, TimeoutError
@@ -27,9 +29,12 @@ from src.components.common.consumer_latency import (
     add_consumer_latency_arguments,
 )
 from src.components.common.prometheus_metrics import (
+    COMPONENT_METRICS_FINAL,
+    CONSUMER_RECEIVED_AT_DRAIN,
     ConsumerPrometheusMetrics,
     start_metrics_server,
 )
+from src.components.common.phase_control import DRAIN_COMPLETE, READY
 
 
 STREAM_NAME = "SCENARIO"
@@ -129,37 +134,68 @@ class NatsConsumer:
                 config.deliver_group = self.consumer_name
         return config
 
-    async def consume(self) -> None:
+    async def consume(
+            self,
+            ready_file: str | None = None,
+            stop_event: asyncio.Event | None = None,
+            drain_event: asyncio.Event | None = None,
+            drain_complete_file: str = DRAIN_COMPLETE,
+    ) -> None:
         logger.info(
             "Started NATS consumption: delivery_mode=%s interaction_mode=%s consumer=%s",
             self.consumer_mode, self.interaction_mode, self.consumer_name,
         )
         if self.consumer_mode == "pull":
-            await self._consume_pull()
+            await self._consume_pull(
+                ready_file, stop_event, drain_event, drain_complete_file
+            )
         else:
-            await self._consume_push()
+            await self._consume_push(
+                ready_file, stop_event, drain_event, drain_complete_file
+            )
 
-    async def _consume_pull(self) -> None:
+    async def _consume_pull(
+            self,
+            ready_file: str | None = None,
+            stop_event: asyncio.Event | None = None,
+            drain_event: asyncio.Event | None = None,
+            drain_complete_file: str = DRAIN_COMPLETE,
+    ) -> None:
         subscription = await self.js.pull_subscribe(
             SUBJECT,
             durable=self.consumer_name,
             config=self._consumer_config(),
         )
+        if ready_file is not None:
+            Path(ready_file).touch()
+        drain_complete = False
         try:
-            while True:
+            while stop_event is None or not stop_event.is_set():
                 try:
                     messages = await subscription.fetch(batch=100, timeout=1)
                 except TimeoutError:
-                    continue
+                    messages = []
                 for message in messages:
                     self._observe(message.data)
                     await message.ack()
+                if (
+                    not drain_complete
+                    and drain_event is not None
+                    and drain_event.is_set()
+                ):
+                    drain_complete = await self._mark_drain_complete_if_empty(
+                        drain_complete_file
+                    )
         finally:
             self._log_metrics(final=True)
 
-    async def _consume_push(self) -> None:
-        completed = asyncio.Event()
-
+    async def _consume_push(
+            self,
+            ready_file: str | None = None,
+            stop_event: asyncio.Event | None = None,
+            drain_event: asyncio.Event | None = None,
+            drain_complete_file: str = DRAIN_COMPLETE,
+    ) -> None:
         async def handler(message) -> None:
             self._observe(message.data)
             if self.guarantee_type == "at_least_once":
@@ -173,10 +209,69 @@ class NatsConsumer:
             config=self._consumer_config(),
             cb=handler,
         )
+        if ready_file is not None:
+            Path(ready_file).touch()
+        drain_monitor = self._start_drain_monitor(drain_event, drain_complete_file)
         try:
-            await completed.wait()
+            await (stop_event or asyncio.Event()).wait()
         finally:
+            await self._cancel_task(drain_monitor)
             self._log_metrics(final=True)
+
+    def _start_drain_monitor(
+            self,
+            drain_event: asyncio.Event | None,
+            drain_complete_file: str,
+    ) -> asyncio.Task[None] | None:
+        if drain_event is None:
+            return None
+        return asyncio.create_task(
+            self._monitor_drain(drain_event, drain_complete_file),
+            name=f"nats-drain-{self.consumer_name}",
+        )
+
+    async def _monitor_drain(
+            self,
+            drain_event: asyncio.Event,
+            drain_complete_file: str,
+    ) -> None:
+        """Signal when this durable has no queued or unacknowledged messages."""
+        await drain_event.wait()
+        while True:
+            if await self._mark_drain_complete_if_empty(drain_complete_file):
+                return
+            await asyncio.sleep(0.25)
+
+    async def _mark_drain_complete_if_empty(self, drain_complete_file: str) -> bool:
+        try:
+            info = await self.js.consumer_info(STREAM_NAME, self.consumer_name)
+        except APIError as error:
+            logger.warning(
+                "Could not inspect NATS consumer %s during drain: %s",
+                self.consumer_name,
+                error,
+            )
+            return False
+
+        pending = int(getattr(info, "num_pending", 0) or 0)
+        ack_pending = int(getattr(info, "num_ack_pending", 0) or 0)
+        if pending != 0 or ack_pending != 0:
+            return False
+        Path(drain_complete_file).touch()
+        logger.info("NATS consumer %s completed drain", self.consumer_name)
+        return True
+
+    @staticmethod
+    async def _cancel_task(task: asyncio.Task[None] | None) -> None:
+        if task is None or task.done():
+            if task is not None:
+                await task
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     def _observe(self, body: bytes) -> None:
         try:
@@ -223,7 +318,15 @@ class NatsConsumer:
             )
     async def close(self) -> None:
         if self.nc is not None:
-            await self.nc.drain()
+            # A JetStream pull subscription can have an outstanding fetch
+            # request even after its durable has no pending messages.  Client
+            # drain waits for that request and prevents final metrics from
+            # becoming scrapeable.  Broker backlog is already verified by the
+            # synchronized drain protocol, so closing the connection is the
+            # correct finalization step here.
+            await self.nc.close()
+            self.nc = None
+            self.js = None
             logger.info("Closed NATS consumer connection")
 
 
@@ -237,6 +340,7 @@ async def main() -> None:
     parser.add_argument("--interaction-mode", choices=("work_queue", "pub_sub"), default="work_queue")
     parser.add_argument("--guarantee-type", choices=("at_most_once", "at_least_once"), default="at_most_once")
     add_consumer_latency_arguments(parser)
+    parser.add_argument("--synchronized", action="store_true")
     args = parser.parse_args()
     consumer = NatsConsumer(
         args.broker_host, args.broker_port, args.consumer_name,
@@ -244,11 +348,35 @@ async def main() -> None:
         args.latency_sample_every, args.metrics_log_every_windows,
     )
     start_metrics_server()
+    if not args.synchronized:
+        try:
+            await consumer.connect()
+            await consumer.consume()
+        finally:
+            await consumer.close()
+        return
+
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    drain = asyncio.Event()
+    loop.add_signal_handler(signal.SIGUSR1, stop.set)
+
+    def begin_drain() -> None:
+        CONSUMER_RECEIVED_AT_DRAIN.set(consumer.measurement_messages_total)
+        drain.set()
+
+    loop.add_signal_handler(signal.SIGUSR2, begin_drain)
     try:
         await consumer.connect()
-        await consumer.consume()
+        await consumer.consume(READY, stop, drain)
+        await consumer.close()
+        COMPONENT_METRICS_FINAL.set(1)
+        # Keep the metrics endpoint alive until scenario cleanup.
+        await asyncio.Event().wait()
     finally:
         await consumer.close()
+        loop.remove_signal_handler(signal.SIGUSR1)
+        loop.remove_signal_handler(signal.SIGUSR2)
 
 
 if __name__ == "__main__":

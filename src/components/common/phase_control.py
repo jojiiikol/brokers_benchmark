@@ -8,6 +8,7 @@ READY = "/tmp/benchmark-ready"
 WARMUP_START = "/tmp/benchmark-warmup-start"
 WARMUP_DONE = "/tmp/benchmark-warmup-done"
 MEASUREMENT_START = "/tmp/benchmark-measurement-start"
+DRAIN_COMPLETE = "/tmp/benchmark-drain-complete"
 
 
 async def wait_for_release(

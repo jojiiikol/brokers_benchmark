@@ -2,17 +2,27 @@ import argparse
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from aiokafka import AIOKafkaProducer
 from aiokafka.errors import KafkaConnectionError
 from src.components.common.load_profile import (
+    LoadType,
     LoadScheduler,
     add_load_profile_arguments,
     publish_with_profile,
     scheduler_from_arguments,
 )
+from src.components.common.phase_control import (
+    MEASUREMENT_START,
+    READY,
+    WARMUP_DONE,
+    WARMUP_START,
+    wait_for_release,
+)
 from src.components.common.producer_metrics import ProducerMetrics, wait_for_result_collection
 from src.components.common.prometheus_metrics import (
+    COMPONENT_METRICS_FINAL,
     ProducerPrometheusMetrics,
     start_metrics_server,
 )
@@ -23,6 +33,41 @@ from src.logger.config import setup_logging
 TOPIC_NAME = "scenario"
 
 logger = logging.getLogger("benchmark.producer.kafka")
+
+
+async def run_benchmark_lifecycle(
+        producer: "KafkaProducer",
+        scheduler: LoadScheduler,
+        *,
+        warmup_seconds: float,
+        duration_seconds: float,
+        synchronized_producer_count: int | None,
+        producer_id: int,
+        ready_file: str = READY,
+        warmup_start_file: str = WARMUP_START,
+        warmup_done_file: str = WARMUP_DONE,
+        measurement_start_file: str = MEASUREMENT_START,
+) -> None:
+    """Run Kafka phases either immediately or under orchestrator control."""
+    if synchronized_producer_count is None:
+        await producer.run_benchmark(warmup_seconds, duration_seconds)
+        return
+    if synchronized_producer_count <= 0:
+        raise ValueError("synchronized_producer_count must be greater than zero")
+
+    Path(ready_file).touch()
+    await wait_for_release(warmup_start_file)
+    await producer.publish_for(warmup_seconds, phase="warmup")
+    Path(warmup_done_file).touch()
+
+    target_rps = scheduler.step_at(0).target_rps
+    offset = (
+        (producer_id - 1) / (synchronized_producer_count * target_rps)
+        if scheduler.load_type is LoadType.CONSTANT and target_rps
+        else 0.0
+    )
+    await wait_for_release(measurement_start_file, offset)
+    await producer.publish_for(duration_seconds - offset, phase="measurement")
 
 
 class KafkaProducer:
@@ -184,6 +229,7 @@ async def main() -> None:
     parser.add_argument("--producer-id", type=int, default=1)
     parser.add_argument("--result-retention-seconds", type=float, default=0)
     parser.add_argument("--completion-file")
+    parser.add_argument("--synchronized-producer-count", type=int)
     args = parser.parse_args()
     if args.warmup_seconds < 0:
         parser.error("--warmup-seconds must be greater than or equal to zero")
@@ -191,6 +237,11 @@ async def main() -> None:
         parser.error("--duration-seconds must be greater than zero")
     if args.result_retention_seconds < 0:
         parser.error("--result-retention-seconds must be greater than or equal to zero")
+    if (
+        args.synchronized_producer_count is not None
+        and args.synchronized_producer_count <= 0
+    ):
+        parser.error("--synchronized-producer-count must be greater than zero")
 
     try:
         scheduler = scheduler_from_arguments(args, args.duration_seconds)
@@ -212,9 +263,18 @@ async def main() -> None:
     start_metrics_server()
     try:
         await producer.connect()
-        await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
+        await run_benchmark_lifecycle(
+            producer,
+            scheduler,
+            warmup_seconds=args.warmup_seconds,
+            duration_seconds=args.duration_seconds,
+            synchronized_producer_count=args.synchronized_producer_count,
+            producer_id=args.producer_id,
+        )
     finally:
         await producer.close()
+    if args.synchronized_producer_count is not None:
+        COMPONENT_METRICS_FINAL.set(1)
     await wait_for_result_collection(args.completion_file, args.result_retention_seconds)
 
 

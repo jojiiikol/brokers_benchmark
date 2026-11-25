@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 import nats
 from nats.errors import NoServersError
@@ -15,8 +16,16 @@ from src.components.common.load_profile import (
 )
 from src.components.common.producer_metrics import ProducerMetrics, wait_for_result_collection
 from src.components.common.prometheus_metrics import (
+    COMPONENT_METRICS_FINAL,
     ProducerPrometheusMetrics,
     start_metrics_server,
+)
+from src.components.common.phase_control import (
+    MEASUREMENT_START,
+    READY,
+    WARMUP_DONE,
+    WARMUP_START,
+    wait_for_release,
 )
 from src.components.common.message_payload import build_message
 from src.logger.config import setup_logging
@@ -158,6 +167,34 @@ class NatsProducer:
             logger.info("Closed NATS producer connection")
 
 
+async def run_synchronized_benchmark(
+        producer: NatsProducer,
+        warmup_seconds: float,
+        duration_seconds: float,
+        producer_count: int,
+        *,
+        ready_path: str = READY,
+        warmup_done_path: str = WARMUP_DONE,
+) -> None:
+    """Run NATS phases released by the scenario orchestrator."""
+    if producer_count <= 0:
+        raise ValueError("synchronized producer count must be greater than zero")
+
+    Path(ready_path).touch()
+    await wait_for_release(WARMUP_START)
+    await producer.publish_for(warmup_seconds, "warmup")
+    Path(warmup_done_path).touch()
+
+    target_rps = producer.load_scheduler.step_at(0).target_rps
+    offset = (
+        (producer.producer_id - 1) / (producer_count * target_rps)
+        if producer.load_scheduler.load_type.value == "constant" and target_rps
+        else 0.0
+    )
+    await wait_for_release(MEASUREMENT_START, offset)
+    await producer.publish_for(max(0.0, duration_seconds - offset), "measurement")
+
+
 async def main() -> None:
     setup_logging()
     parser = argparse.ArgumentParser()
@@ -173,6 +210,7 @@ async def main() -> None:
     parser.add_argument("--producer-id", type=int, default=1)
     parser.add_argument("--result-retention-seconds", type=float, default=0)
     parser.add_argument("--completion-file")
+    parser.add_argument("--synchronized-producer-count", type=int)
     args = parser.parse_args()
     if args.warmup_seconds < 0 or args.duration_seconds <= 0:
         parser.error("Invalid benchmark durations")
@@ -196,9 +234,19 @@ async def main() -> None:
     start_metrics_server()
     try:
         await producer.connect()
-        await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
+        if args.synchronized_producer_count is None:
+            await producer.run_benchmark(args.warmup_seconds, args.duration_seconds)
+        else:
+            await run_synchronized_benchmark(
+                producer,
+                args.warmup_seconds,
+                args.duration_seconds,
+                args.synchronized_producer_count,
+            )
     finally:
         await producer.close()
+    if args.synchronized_producer_count is not None:
+        COMPONENT_METRICS_FINAL.set(1)
     await wait_for_result_collection(args.completion_file, args.result_retention_seconds)
 
 

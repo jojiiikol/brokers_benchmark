@@ -38,6 +38,7 @@ class Consumer:
     def __init__(
             self,
             queue_name: str = "scenario",
+            exchange_name: str = "scenario",
             broker_user: str = "guest",
             broker_password: str = "guest",
             broker_host: str = "rabbit_mq",
@@ -67,6 +68,7 @@ class Consumer:
 
 
         self.queue_name = queue_name
+        self.exchange_name = exchange_name
         self.interaction_mode = interaction_mode
         self.guarantee_type = guarantee_type
         self.metrics = LatencyMetrics()
@@ -106,17 +108,20 @@ class Consumer:
 
         if self.interaction_mode == "pub_sub":
             exchange = await self._channel.declare_exchange(
-                name=self.queue_name,
+                name=self.exchange_name,
                 type=aio_pika.ExchangeType.FANOUT,
                 durable=True,
             )
             self._queue = await self._channel.declare_queue(
-                name="",
-                exclusive=True,
-                auto_delete=True,
+                name=self.queue_name,
+                durable=True,
             )
             await self._queue.bind(exchange)
-            logger.info("Bound exclusive RabbitMQ subscriber queue to %s", self.queue_name)
+            logger.info(
+                "Bound RabbitMQ subscriber queue %s to exchange %s",
+                self.queue_name,
+                self.exchange_name,
+            )
         else:
             self._queue = await self._channel.declare_queue(
                 name=self.queue_name,
@@ -231,6 +236,16 @@ async def main():
         help="RabbitMQ delivery topology",
     )
     parser.add_argument(
+        "--queue-name",
+        default="scenario",
+        help="RabbitMQ work queue or instance-specific subscriber queue",
+    )
+    parser.add_argument(
+        "--exchange-name",
+        default="scenario",
+        help="RabbitMQ fanout exchange used in pub/sub mode",
+    )
+    parser.add_argument(
         "--guarantee-type",
         choices=("at_most_once", "at_least_once"),
         default="at_most_once",
@@ -239,7 +254,8 @@ async def main():
     args = parser.parse_args()
 
     consumer = Consumer(
-        queue_name="scenario",
+        queue_name=args.queue_name,
+        exchange_name=args.exchange_name,
         broker_host=args.broker_host,
         broker_port=args.broker_port,
         metrics_window_size=args.metrics_window_size,
