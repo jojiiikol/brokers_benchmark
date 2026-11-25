@@ -16,3 +16,5 @@ prometheus-client==0.23.1
 fastapi==0.163.2
 uvicorn==0.54.0
 httpx==0.28.1
+
+coverage==7.17.5

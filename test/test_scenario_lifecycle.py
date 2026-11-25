@@ -866,4 +866,3 @@ class ConsumerMetricsReportingTests(unittest.TestCase):
 
         self.assertEqual(consumer.received_messages_total, 2)
         self.assertEqual(consumer.measurement_messages_total, 1)
-
