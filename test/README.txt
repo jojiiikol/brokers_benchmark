@@ -1,6 +1,18 @@
 Unit tests
 ==========
 
+Live smoke test (requires Docker Compose, curl, Python 3 and a running Docker daemon):
+  make smoke
+
+Builds and starts all default Compose services, checks API and Grafana health,
+checks the Prometheus orchestrator scrape, submits a small RabbitMQ scenario,
+waits for FINISHED and verifies nonzero measurement producer/consumer counters.
+Returns nonzero and prints Compose status/logs on failure. On failure it requests
+cleanup of only its own scenario. The stack and volumes are left running.
+The first run may take several minutes to download and build component images.
+Customize URLs or the per-check deadline:
+  python3 test/smoke.py --timeout 360 --api-url http://localhost:8080
+
 Install test dependencies from the repository root:
   .venv/bin/python -m pip install -r requirements-test.txt
 
